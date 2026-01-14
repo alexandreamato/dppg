@@ -76,8 +76,11 @@ XX        Identificador do canal/tipo (ex: E2, E1)
 ```
 
 **Labels observados**:
-- `4C E2` = "Lâ" (canal/medição tipo â)
-- `4C E1` = "Lá" (canal/medição tipo á)
+- `4C E2` = "Lâ" (0xE2 = 226) - 250 amostras típico
+- `4C E1` = "Lá" (0xE1 = 225) - 213 amostras típico
+- `4C DF` = "Lß" (0xDF = 223) - 224 amostras típico
+
+*Hipótese*: Os labels podem representar diferentes canais de medição ou fases do exame.
 
 ### 3.2 Cabeçalho de Dados
 
@@ -254,6 +257,9 @@ Dados: 213 amostras
 | 2026-01-14 | Problema identificado: "offline" após transmissão |
 | 2026-01-14 | **RESOLVIDO**: ACK deve ser enviado após QUALQUER pacote, não só DLE |
 | 2026-01-14 | Exportação estável de múltiplos exames (4 exames) confirmada |
+| 2026-01-14 | Parser de blocos implementado - detecta labels e extrai amostras corretamente |
+| 2026-01-14 | Novo label descoberto: Lß (0xDF) com 224 amostras |
+| 2026-01-14 | Status de conexão melhorado: TCP OK → Printer Online |
 
 ---
 
