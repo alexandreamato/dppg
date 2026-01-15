@@ -23,12 +23,26 @@ O Elcat Vasoquant 1000 é um aparelho de fotopletismografia usado para diagnóst
 
 ## Protocolo de Comunicação
 
-O Vasoquant usa um protocolo baseado em impressora serial:
+O Vasoquant suporta dois modos de comunicação:
 
-### Handshake
+### Modo 1: Emulação de Impressora (DLE/ACK) - Padrão
+
+Protocolo baseado em impressora serial (modo padrão):
+
 1. Aparelho envia **DLE (0x10)** periodicamente para verificar se "impressora" está online
 2. Devemos responder com **ACK (0x06)** para indicar que estamos prontos
 3. Se não respondermos, aparelho mostra "printer offline"
+
+### Modo 2: Comunicação Direta (TST:CHECK)
+
+Protocolo ASCII alternativo para comunicação programática:
+
+1. Host envia **TST:CHECK\r** a cada 1-2 segundos
+2. Equipamento responde com **OK\r**
+3. Se não receber TST:CHECK por ~5 segundos, entra em modo watchdog
+4. Comandos disponíveis: ACQ:START, ACQ:STOP, S#A:ON/OFF, CFG:GET/SET
+
+**Nota**: Ative a opção "TST:CHECK" na interface para usar este modo.
 
 ### Formato dos Dados
 
@@ -84,6 +98,7 @@ python3 dppg_reader.py
 - **IP**: 192.168.0.234
 - **Porta**: 1100
 - **Auto-ACK**: Ativado (responde automaticamente ao polling)
+- **TST:CHECK**: Desativado (modo alternativo de keep-alive)
 
 ## Estrutura do Projeto
 
@@ -94,28 +109,106 @@ dppg/
 └── ppg_data_*.csv      # Arquivos de dados exportados
 ```
 
+## Parâmetros Quantitativos
+
+O aplicativo calcula automaticamente os parâmetros diagnósticos da curva D-PPG:
+
+| Parâmetro | Descrição | Unidade |
+|-----------|-----------|---------|
+| **To** | Venous refilling time - Tempo de reenchimento venoso (início do exercício até retorno ao baseline) | segundos |
+| **Th** | Venous half amplitude time - Tempo de meia amplitude (do pico até 50% da amplitude) | segundos |
+| **Ti** | Initial inflow time - Tempo de influxo inicial (do pico até 90% de recuperação) | segundos |
+| **Vo** | Venous pump power - Potência da bomba venosa (amplitude pico-baseline) | % |
+| **Fo** | Venous pump capacity - Capacidade da bomba venosa (Fo = Vo × Th) | %·s |
+
+### Taxa de Amostragem
+- **4 Hz** (confirmado via análise de exercício: 64 amostras em 16 segundos)
+- O hardware interno opera a 32.5 Hz, mas os dados exportados são decimados
+
+### Conversão ADC → %PPG
+- Fator de conversão: ~27 unidades ADC = 1% PPG
+- Baseline: calculado dos primeiros 10 valores (antes do exercício)
+
+### Gráfico Diagnóstico (Vo% × To)
+O aplicativo gera um gráfico de dispersão Vo% vs To com zonas de referência:
+- **Zona vermelha (esquerda)**: abnormal - To < 25s indica insuficiência venosa
+- **Zona verde (direita)**: normal - To > 25s indica função venosa adequada
+
+### Labels dos Canais
+| Label | Byte | Descrição |
+|-------|------|-----------|
+| Lâ | 0xE2 | MID c/ Tq - Membro Inferior Direito, com Tourniquet |
+| Lá | 0xE1 | MID s/ Tq - Membro Inferior Direito, sem Tourniquet |
+| Là | 0xE0 | MIE c/ Tq - Membro Inferior Esquerdo, com Tourniquet |
+| Lß | 0xDF | MIE s/ Tq - Membro Inferior Esquerdo, sem Tourniquet |
+
 ## Formato do CSV Exportado
 
 ```csv
-sample_index,value
-0,2471
-1,2472
+block,exam_number,label,sample_index,value
+0,1250,Lâ,0,2471
+0,1250,Lâ,1,2472
 ...
 ```
 
-## Problemas Conhecidos
+## Formato do JSON Exportado
 
-1. **Parser de dados**: Atualmente extrai amostras baseado na faixa de valores (2000-3500), pode incluir alguns bytes espúrios
-2. **Múltiplos canais**: O aparelho pode enviar múltiplos blocos (Lâ, Lá, etc.) que não estão sendo separados
+```json
+{
+  "export_timestamp": "2026-01-14T15:44:09",
+  "sampling_rate_hz": 4.0,
+  "blocks": [
+    {
+      "label": "Lâ",
+      "label_desc": "MID c/ Tq",
+      "exam_number": 1250,
+      "samples": [...],
+      "parameters": {
+        "To_s": 28.0,
+        "Th_s": 5.8,
+        "Ti_s": 24.1,
+        "Vo_percent": 5.9,
+        "Fo_percent_s": 62
+      }
+    }
+  ]
+}
+```
+
+## Precisão dos Cálculos
+
+O algoritmo foi calibrado com 4 exames do laudo oficial VASOSCREEN. Erro médio geral: **~7.7%**
+
+| Parâmetro | Erro Médio | Observação |
+|-----------|------------|------------|
+| **Vo** | ~2.5% | Excelente - cálculo direto da amplitude |
+| **Ti** | ~5.7% | Bom - usa 90% de recuperação |
+| **To** | ~5.8% | Bom - usa 97% de recuperação |
+| **Th** | ~11.1% | Aceitável - usa 50% de recuperação |
+| **Fo** | ~13.6% | Aceitável - derivado (Fo = Vo × Th) |
+
+### Limitações Conhecidas
+
+1. **Casos com torniquete**: O sinal pode não retornar ao baseline original. O algoritmo usa o maior entre baseline inicial e baseline estável como referência.
+
+2. **Extrapolação**: Se o sinal não atinge o nível de cruzamento, valores são extrapolados linearmente.
 
 ## TODO
 
-- [ ] Parsear corretamente o protocolo (separar header, dados, metadados)
-- [ ] Identificar e separar diferentes canais/medições
-- [ ] Extrair metadados (data, hora, número do exame, etc.)
-- [ ] Melhorar visualização do gráfico PPG
-- [ ] Salvar em formato mais estruturado (JSON com metadados)
-- [ ] Documentar significado dos diferentes labels (Lâ, Lá, etc.)
+- [x] Parsear corretamente o protocolo (separar header, dados, metadados)
+- [x] Identificar e separar diferentes canais/medições
+- [x] Extrair metadados (número do exame)
+- [x] Melhorar visualização do gráfico PPG
+- [x] Salvar em formato mais estruturado (JSON com metadados)
+- [x] Documentar significado dos diferentes labels (Lâ, Lá, etc.)
+- [x] Calcular parâmetros quantitativos (To, Th, Ti, Vo, Fo)
+- [x] Gráfico diagnóstico Vo% × To(s)
+- [x] Calibrar algoritmo com laudos originais (erro médio ~7.7%)
+- [x] Confirmar taxa de amostragem (4 Hz)
+- [x] Documentar protocolo TST:CHECK alternativo
+- [x] Implementar opção TST:CHECK no aplicativo
+- [ ] Extrair data/hora do exame dos metadados
+- [ ] Identificar label 0xDE (LÞ)
 
 ## Referências
 

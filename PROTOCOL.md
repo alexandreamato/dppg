@@ -26,11 +26,19 @@ Documentação da engenharia reversa do protocolo serial do aparelho D-PPG Elcat
 
 ---
 
-## 2. Handshake / Polling (Confirmado)
+## 2. Mecanismos de Keep-Alive
+
+O Vasoquant suporta dois mecanismos de keep-alive, dependendo do modo de operação.
+
+---
+
+### 2.1 Protocolo de Emulação de Impressora (DLE/ACK)
+
+**Modo**: Exportação de exames para "impressora serial"
 
 O Vasoquant verifica periodicamente se a "impressora" está conectada.
 
-### Sequência de Polling
+#### Sequência de Polling
 
 ```
 Vasoquant → Host:  0x10 (DLE)
@@ -40,7 +48,82 @@ Host → Vasoquant:  0x06 (ACK)
 - **Intervalo**: ~1 segundo quando idle
 - **Comportamento**: Se não receber ACK, aparelho mostra "printer offline"
 
-### Descoberta Importante: ACK Contínuo
+---
+
+### 2.2 Protocolo ASCII de Comando (TST:CHECK)
+
+**Modo**: Comunicação direta com o equipamento VL320/VQ1000
+
+Este protocolo alternativo usa comandos ASCII para manter a conexão ativa.
+
+#### Formato Geral de Comandos
+
+```
+[COMANDO]:[SUBCOMANDO]/[PARÂMETROS]<CR>
+```
+
+- Terminador: `<CR>` (Carriage Return, 0x0D)
+- Separadores: `:` entre comando e subcomando, `/` entre subcomando e parâmetros
+
+#### Comando de Keep-Alive
+
+```
+TST:CHECK<CR>
+```
+
+- **Intervalo**: Enviar a cada **1-2 segundos**
+- **Timeout**: Se não receber por ~5 segundos, equipamento entra em modo watchdog
+- **Watchdog**: Equipamento para aquisição e aguarda reconexão
+
+#### Sequência de Conexão
+
+```
+┌─────────────┐                              ┌──────────┐
+│  VQ1000     │                              │   Host   │
+└──────┬──────┘                              └────┬─────┘
+       │                                          │
+       │  ◄─── TST:CHECK<CR> ────────────────     │  Keep-alive
+       │  ──── OK<CR> ───────────────────────►    │  Resposta
+       │                                          │
+       │        ... (repetido a cada 1-2s) ...    │
+       │                                          │
+       │  ◄─── ACQ:START<CR> ────────────────     │  Iniciar aquisição
+       │  ──── STARTED<CR> ──────────────────►    │  Confirmação
+       │                                          │
+       │  ════ [Dados de aquisição] ═════════►    │  Stream de dados
+       │                                          │
+       │  ◄─── ACQ:STOP<CR> ─────────────────     │  Parar aquisição
+       │  ──── STOPPED<CR> ──────────────────►    │  Confirmação
+       │                                          │
+```
+
+#### Comandos Conhecidos
+
+| Comando | Descrição |
+|---------|-----------|
+| `TST:CHECK` | Keep-alive / verificação de conexão |
+| `ACQ:START` | Iniciar aquisição de dados |
+| `ACQ:STOP` | Parar aquisição de dados |
+| `S#A:ON` | Ativar canal # (ex: S1A:ON, S2A:ON) |
+| `S#A:OFF` | Desativar canal # |
+| `CFG:GET` | Obter configuração atual |
+| `CFG:SET/[param]=[value]` | Definir parâmetro de configuração |
+
+#### Comportamento do Watchdog
+
+1. Host conecta via TCP
+2. Host envia `TST:CHECK` a cada 1-2 segundos
+3. Equipamento responde com `OK` ou similar
+4. Se `TST:CHECK` não for recebido por ~5 segundos:
+   - Equipamento assume desconexão
+   - Aquisição é interrompida automaticamente
+   - Equipamento aguarda nova conexão
+
+**Nota**: Este protocolo é usado para comunicação direta/programática com o equipamento, diferente do modo de emulação de impressora que é usado para exportação manual de exames.
+
+---
+
+### 2.3 Descoberta Importante: ACK Contínuo (Modo Impressora)
 
 **O Vasoquant espera ACK (0x06) como resposta a QUALQUER dado enviado, não apenas ao DLE de polling.**
 
@@ -75,12 +158,25 @@ XX        Identificador do canal/tipo (ex: E2, E1)
 04        EOT - Fim do cabeçalho de label
 ```
 
-**Labels observados**:
-- `4C E2` = "Lâ" (0xE2 = 226) - 250 amostras típico
-- `4C E1` = "Lá" (0xE1 = 225) - 213 amostras típico
-- `4C DF` = "Lß" (0xDF = 223) - 224 amostras típico
+**Labels observados e seus significados (CONFIRMADO via laudo oficial)**:
+| Código | Caracter | Byte | Significado | Descrição |
+|--------|----------|------|-------------|-----------|
+| `4C E2` | Lâ | 0xE2 (226) | MID c/ Tq | Membro Inferior Direito, com Tourniquet |
+| `4C E1` | Lá | 0xE1 (225) | MID s/ Tq | Membro Inferior Direito, sem Tourniquet |
+| `4C E0` | Là | 0xE0 (224) | MIE c/ Tq | Membro Inferior Esquerdo, com Tourniquet |
+| `4C DF` | Lß | 0xDF (223) | MIE s/ Tq | Membro Inferior Esquerdo, sem Tourniquet |
+| `4C DE` | LÞ | 0xDE (222) | ? | A ser identificado |
 
-*Hipótese*: Os labels podem representar diferentes canais de medição ou fases do exame.
+**Legenda**:
+- MID = Membro Inferior Direito
+- MIE = Membro Inferior Esquerdo
+- Tq = Tourniquet (garrote)
+
+**Correlação Label → Exame** (baseado em laudo oficial):
+- Exame #1250 → Label 0xE2 (Lâ) → MID com Tourniquet
+- Exame #1249 → Label 0xE1 (Lá) → MID sem Tourniquet
+- Exame #1248 → Label 0xE0 (Là) → MIE com Tourniquet
+- Exame #1247 → Label 0xDF (Lß) → MIE sem Tourniquet
 
 ### 3.2 Cabeçalho de Dados
 
@@ -103,24 +199,113 @@ LL HH LL HH LL HH ...
 - **Faixa observada**: 2000-3500 (sugere ADC de 12 bits)
 - **Exemplo**: `A7 09` = 0x09A7 = 2471
 
-### 3.4 Metadados / Rodapé (Em Investigação)
+### 3.4 Metadados / Rodapé (Parcialmente Confirmado)
 
-Após os dados PPG, há bytes adicionais que parecem conter metadados:
+Após os dados PPG, há bytes adicionais que contêm metadados:
 
 ```
 Exemplo observado:
 1D A7 09 00 00 00 1D E2 04 87 34 A2 00 FE 1E 44 18 00 04
 ```
 
-**Hipóteses**:
+#### 3.4.1 Número do Exame (CONFIRMADO)
+
+O número do exame está no **SEGUNDO** GS do rodapé, com formato completo:
+
+```
+1D XX XX 00 00 00 1D YY YY
+```
+
+- `1D` = GS (Group Separator) - primeiro marcador
+- `XX XX` = Cópia do primeiro valor do bloco (verificação?)
+- `00 00 00` = Separador/padding
+- `1D` = GS (segundo marcador)
+- `YY YY` = Número do exame em 16 bits little-endian
+
+**Exemplo completo**:
+```
+1D A7 09 00 00 00 1D E2 04
+```
+- A7 09 = 2471 (primeiro sample do bloco)
+- E2 04 = 1250 (número do exame)
+
+**Exemplos confirmados**:
+- Exame 1250: `1D E2 04` → 0x04E2 = 1250
+- Exame 1245: `1D DD 04` → 0x04DD = 1245
+
+#### 3.4.2 Artefatos no Final dos Dados (IDENTIFICADO)
+
+Os últimos 3 valores de cada bloco frequentemente são **artefatos** (não são dados clínicos válidos):
+
+**Exemplo observado** (final do Bloco Lâ):
+```
+Últimos valores: ..., 2517, 2703, 2363, 2504
+                       ↑      ↑      ↑      ↑
+                    normal  spike  baixo  meta
+```
+
+- Valor 2517 = normal (dentro da faixa esperada ~2400-2650)
+- Valor 2703 = spike anômalo (muito acima da média)
+- Valores 2363, 2504 = possivelmente bytes de controle/metadados
+
+**Tratamento**: O parser remove automaticamente valores outliers do final (> 3 desvios padrão da média).
+
+#### 3.4.3 Outros Campos (Em Investigação)
+
+**Hipóteses para bytes restantes após número do exame**:
 - Checksum ou CRC
 - Timestamp
-- Número do exame
 - Configurações da medição
 
 ---
 
-## 4. Caracteres de Controle (Confirmado)
+## 4. Taxa de Amostragem e Conversão de Dados (CONFIRMADO)
+
+### 4.1 Taxa de Amostragem
+
+**CONFIRMADO via análise de exercício**:
+- Exercício padrão: 8 movimentos de dorsiflexão em 16 segundos
+- Amostras no período de exercício: ~64
+- **Taxa de amostragem: 4 Hz** (64 amostras / 16 segundos)
+
+*Nota*: Os 32.5 Hz encontrados no binário do software original são a taxa interna do hardware ADC, mas os dados exportados são decimados para 4 Hz.
+
+### 4.2 Conversão ADC → %PPG
+
+**Observações do laudo oficial**:
+- Eixo Y do gráfico: -2% a 8% PPG
+- Valores ADC capturados: ~2400-2700
+
+**Fórmula de conversão estimada**:
+```
+%PPG = (valor_ADC - baseline) / fator_conversao
+```
+
+Onde:
+- `baseline` = média dos primeiros ~10 valores (antes da deflexão venosa)
+- `fator_conversao` ≈ 27 unidades ADC por %PPG
+
+**Exemplo**:
+- Baseline: 2471 ADC
+- Pico: 2633 ADC
+- Delta: 2633 - 2471 = 162 unidades
+- %PPG no pico: 162 / 27 ≈ 6%
+
+### 4.3 Parâmetros Clínicos (do laudo)
+
+O software VASOSCREEN calcula os seguintes parâmetros:
+
+| Parâmetro | Símbolo | Unidade | Descrição |
+|-----------|---------|---------|-----------|
+| Venous refilling time | To | s | Tempo de reenchimento venoso |
+| Venous half ampl. time | Th | s | Tempo para metade da amplitude |
+| Initial inflow time | Ti | s | Tempo de influxo inicial |
+| Venous pump power | Vo | % | Potência da bomba venosa |
+| Venous pump capacity | Fo | %s | Capacidade da bomba venosa |
+
+---
+
+## 5. Caracteres de Controle (Confirmado)
 
 | Hex | Nome | Descrição |
 |-----|------|-----------|
@@ -173,14 +358,17 @@ Exemplo observado:
 - [ ] ~~Timeout muito curto no polling?~~ Não era o problema
 - [ ] ~~Handshake de hardware (DTR/RTS) sendo verificado?~~ Não era o problema
 
-### 6.2 Significado dos Labels
+### 6.2 Significado dos Labels - ✅ RESOLVIDO
 
 **Pergunta**: O que significam os diferentes labels (Lâ, Lá)?
 
-**Hipóteses**:
-- [ ] Diferentes canais de medição (pé esquerdo/direito?)
-- [ ] Diferentes tipos de dados (PPG bruto vs processado?)
-- [ ] Diferentes fases do exame?
+**Resposta** (confirmado via laudo oficial VASOSCREEN):
+- [x] Diferentes canais de medição (pé esquerdo/direito?) **SIM**
+- [x] Diferentes tipos de medição (com/sem Tourniquet) **SIM**
+- [ ] ~~Diferentes tipos de dados (PPG bruto vs processado?)~~ Não
+- [ ] ~~Diferentes fases do exame?~~ Não
+
+**Ver seção 3.1 para mapeamento completo dos labels.**
 
 ### 6.3 Estrutura dos Metadados
 
@@ -197,18 +385,16 @@ Bloco 2: ... 1D E1 04 64 1B A0 00 C8 14 42 11 00 04
 - [ ] Bytes intermediários podem ser timestamp ou ID
 - [ ] `00 04` no final indica fim de transmissão
 
-### 6.4 Taxa de Amostragem
+### 6.4 Taxa de Amostragem - ✅ CONFIRMADO
 
 **Pergunta**: Qual a taxa de amostragem dos dados PPG?
 
-**Informação necessária**:
-- Manual técnico do equipamento
-- Ou análise temporal dos dados (se tiver timestamp)
+**Resposta** (CONFIRMADO via análise de exercício):
+- Taxa de amostragem: **4 Hz** (8 movimentos em 16s = 64 amostras / 16s)
+- Hardware interno opera a 32.5 Hz, mas dados exportados são decimados
+- Adequada para D-PPG (mede refilling venoso, não pulsação)
 
-**Hipóteses comuns para PPG**:
-- [ ] 50 Hz
-- [ ] 100 Hz
-- [ ] 200 Hz
+**Ver seção 4.1 para detalhes.**
 
 ### 6.5 Múltiplos Exames
 
@@ -260,15 +446,52 @@ Dados: 213 amostras
 | 2026-01-14 | Parser de blocos implementado - detecta labels e extrai amostras corretamente |
 | 2026-01-14 | Novo label descoberto: Lß (0xDF) com 224 amostras |
 | 2026-01-14 | Status de conexão melhorado: TCP OK → Printer Online |
+| 2026-01-14 | **CONFIRMADO**: Número do exame em metadados: GS + 16-bit LE (1250=E2 04, 1245=DD 04) |
+| 2026-01-14 | **CORRIGIDO**: Número do exame está no SEGUNDO GS (após 00 00 00), não no primeiro |
+| 2026-01-14 | **IDENTIFICADO**: Artefatos no final dos dados (últimos ~3 valores são outliers) |
+| 2026-01-14 | Parser atualizado para remover outliers automaticamente |
+| 2026-01-14 | **TESTE**: 5 exames exportados com sucesso (1250, 1249, 1248, 1247, 1246) |
+| 2026-01-14 | Novo label descoberto: LÞ (0xDE) com 202 amostras |
+| 2026-01-14 | Gráfico atualizado com escala vertical numérica |
+| 2026-01-14 | Algoritmo de remoção de artefatos melhorado (IQR-based) |
+| 2026-01-14 | Parser aguarda metadados antes de criar bloco |
+| 2026-01-14 | **ANÁLISE LAUDO**: Comparação com laudo oficial VASOSCREEN v1.04 |
+| 2026-01-14 | **CONFIRMADO**: Labels mapeados para MID/MIE com/sem Tourniquet (via laudo) |
+| 2026-01-14 | **ESTIMADO**: Taxa de amostragem ~8.33 Hz (250 samples / 30s do laudo) |
+| 2026-01-14 | **IMPLEMENTADO**: Conversão ADC → %PPG (fator ~27 unidades/%) |
+| 2026-01-14 | **IMPLEMENTADO**: Gráfico com eixo Y em %PPG e eixo X em segundos |
+| 2026-01-14 | **CORRIGIDO**: Thread safety com queue.Queue para dados network→UI |
+| 2026-01-14 | **MELHORADO**: Aplicação retroativa de exam_number em blocos da sessão |
+| 2026-01-14 | **ADICIONADO**: Registro de metadata_raw para análise futura |
+| 2026-01-14 | **CONFIRMADO**: Taxa de amostragem 4 Hz (via análise de exercício: 64 amostras / 16s) |
+| 2026-01-14 | **CALIBRADO**: Algoritmo de cálculo de parâmetros (To, Th, Ti, Vo, Fo) com erro médio ~7.7% |
+| 2026-01-15 | **DOCUMENTADO**: Protocolo ASCII alternativo (TST:CHECK) para keep-alive VL320/VQ1000 |
 
 ---
 
 ## 10. Próximos Passos
 
+### Concluídos ✅
+
 1. ~~**Resolver problema do "offline"**~~: ✅ RESOLVIDO - ACK contínuo
-2. **Decodificar metadados**: Entender estrutura do rodapé
-3. **Identificar labels**: Descobrir significado de Lâ vs Lá
-4. **Taxa de amostragem**: Determinar frequência dos dados PPG
-5. ~~**Testar múltiplos exames**~~: ✅ CONFIRMADO - 4 exames exportados com sucesso
-6. **Melhorar parser**: Separar blocos de dados corretamente
-7. **Interface**: Mostrar dados de forma mais organizada
+2. ~~**Decodificar metadados**~~: ✅ PARCIAL - Número do exame identificado (GS + 16-bit LE)
+3. ~~**Identificar labels**~~: ✅ CONFIRMADO via laudo - MID/MIE com/sem Tourniquet
+4. ~~**Taxa de amostragem**~~: ✅ ESTIMADO - ~8.33 Hz (baseado no laudo)
+5. ~~**Testar múltiplos exames**~~: ✅ CONFIRMADO - 5 exames exportados com sucesso (1250-1246)
+6. ~~**Melhorar parser**~~: ✅ RESOLVIDO - Blocos e número do exame extraídos corretamente
+7. ~~**Interface**~~: ✅ MELHORADO - Gráfico com %PPG e escala temporal
+8. ~~**Estabilidade**~~: ✅ MELHORADO - Thread safety com queue.Queue
+9. ~~**Conversão de dados**~~: ✅ IMPLEMENTADO - ADC → %PPG
+
+### Em Progresso 🔄
+
+10. **Remover artefatos**: Refinar algoritmo IQR para diferentes tipos de blocos
+11. **Validar conversão %PPG**: Comparar gráficos com laudo oficial para calibração fina
+
+### Futuros 📋
+
+12. **Decodificar metadados restantes**: Bytes após exam_number (timestamp? checksum?)
+13. ~~**Calcular parâmetros clínicos**~~: ✅ IMPLEMENTADO - To, Th, Ti, Vo, Fo calibrados
+14. **Identificar label 0xDE (LÞ)**: Significado ainda desconhecido
+15. **Captura raw para análise**: Salvar bytes brutos para debugging
+16. **Implementar modo TST:CHECK**: Adicionar suporte ao protocolo ASCII alternativo para comunicação direta
