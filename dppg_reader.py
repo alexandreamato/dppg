@@ -22,6 +22,18 @@ import json
 import os
 
 
+class NumpyEncoder(json.JSONEncoder):
+    """Custom JSON encoder que converte tipos numpy para tipos Python nativos"""
+    def default(self, obj):
+        if isinstance(obj, np.integer):
+            return int(obj)
+        if isinstance(obj, np.floating):
+            return float(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return super().default(obj)
+
+
 # Mapeamento de labels para descrições (baseado no laudo oficial)
 LABEL_DESCRIPTIONS = {
     0xE2: "MID c/ Tq",   # Membro Inferior Direito, com Tourniquet
@@ -300,7 +312,7 @@ class DPPGReader:
 
     # Comandos do protocolo ASCII (TST:CHECK)
     CMD_CHECK = b"TST:CHECK\r"
-    KEEPALIVE_INTERVAL_MS = 1500  # 1.5 segundos
+    KEEPALIVE_INTERVAL_MS = 1000  # 1 segundo - keep-alive mais frequente
 
     def __init__(self):
         self.root = tk.Tk()
@@ -340,7 +352,7 @@ class DPPGReader:
         self.show_ppg_percent = tk.BooleanVar(value=True)
 
         # Opção de protocolo de keep-alive
-        self.use_tst_check = tk.BooleanVar(value=False)
+        self.use_tst_check = tk.BooleanVar(value=True)  # Habilitado por padrão para estabilidade
         self.keepalive_timer_id = None
 
         self.setup_ui()
@@ -1001,7 +1013,7 @@ class DPPGReader:
             }
 
             with open(filename, 'w') as f:
-                json.dump(data, f, indent=2)
+                json.dump(data, f, indent=2, cls=NumpyEncoder)
 
             self.log(f"JSON salvo em {filename}", "info")
         except Exception as e:
@@ -1050,6 +1062,22 @@ class DPPGReader:
             self.log(f"Conectando a {host}:{port}...")
 
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+
+            # Habilitar TCP keep-alive para manter conexão ativa
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            # No macOS/Linux, configurar intervalos mais agressivos
+            try:
+                import platform
+                if platform.system() == 'Darwin':  # macOS
+                    # TCP_KEEPALIVE = intervalo em segundos
+                    self.socket.setsockopt(socket.IPPROTO_TCP, 0x10, 5)  # TCP_KEEPALIVE = 5s
+                elif platform.system() == 'Linux':
+                    self.socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 5)
+                    self.socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 2)
+                    self.socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
+            except (AttributeError, OSError):
+                pass  # Ignorar se não suportado
+
             self.socket.settimeout(5)
             self.socket.connect((host, port))
             self.socket.settimeout(0.5)
