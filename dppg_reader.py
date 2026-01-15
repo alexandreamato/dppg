@@ -418,6 +418,9 @@ class DPPGReader:
         self.clear_log_btn = ttk.Button(data_frame, text="Limpar Log", command=self.clear_log)
         self.clear_log_btn.pack(side=tk.LEFT, padx=5)
 
+        self.capture_btn = ttk.Button(data_frame, text="● Captura Raw", command=self.toggle_raw_capture)
+        self.capture_btn.pack(side=tk.LEFT, padx=5)
+
         self.blocks_label = ttk.Label(data_frame, text="Blocos: 0", font=("Helvetica", 11, "bold"))
         self.blocks_label.pack(side=tk.LEFT, padx=20)
 
@@ -514,6 +517,29 @@ class DPPGReader:
 
     def clear_log(self):
         self.log_text.delete(1.0, tk.END)
+
+    def toggle_raw_capture(self):
+        """Alterna captura bruta de todos os dados recebidos/enviados"""
+        if self.capture_enabled:
+            # Parar captura
+            self.capture_enabled = False
+            if self.raw_capture_file:
+                self.raw_capture_file.close()
+                self.raw_capture_file = None
+            self.capture_btn.config(text="● Captura Raw")
+            self.log("Captura bruta finalizada", "info")
+        else:
+            # Iniciar captura
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"raw_capture_{timestamp}.bin"
+            try:
+                self.raw_capture_file = open(filename, "wb")
+                self.capture_enabled = True
+                self.capture_btn.config(text="■ Parar Captura")
+                self.log(f"Captura bruta iniciada: {filename}", "info")
+                self.log("Todos os bytes RX/TX serão salvos!", "info")
+            except Exception as e:
+                self.log(f"Erro ao iniciar captura: {e}", "error")
 
     def clear_data(self):
         self.ppg_blocks = []
@@ -1225,6 +1251,19 @@ class DPPGReader:
             self.root.after(0, lambda: self.status_label.config(text="Printer Online", foreground="green"))
             self.root.after(0, lambda: self.log("Vasoquant conectado!", "info"))
 
+        # Captura bruta - salvar em arquivo binário
+        if self.capture_enabled and self.raw_capture_file:
+            try:
+                # Formato: [timestamp 4 bytes][direção 1 byte][tamanho 2 bytes][dados]
+                import struct
+                import time
+                ts = int(time.time() * 1000) & 0xFFFFFFFF  # timestamp em ms
+                self.raw_capture_file.write(struct.pack('<IBH', ts, 0x52, len(data)))  # 0x52 = 'R' (RX)
+                self.raw_capture_file.write(data)
+                self.raw_capture_file.flush()
+            except:
+                pass
+
         # Log resumido dos dados
         hex_preview = ' '.join(f'{b:02X}' for b in data[:20])
         if len(data) > 20:
@@ -1236,6 +1275,17 @@ class DPPGReader:
         if self.socket:
             try:
                 self.socket.send(b'\x06')
+                # Captura bruta - salvar TX também
+                if self.capture_enabled and self.raw_capture_file:
+                    try:
+                        import struct
+                        import time
+                        ts = int(time.time() * 1000) & 0xFFFFFFFF
+                        self.raw_capture_file.write(struct.pack('<IBH', ts, 0x54, 1))  # 0x54 = 'T' (TX)
+                        self.raw_capture_file.write(b'\x06')
+                        self.raw_capture_file.flush()
+                    except:
+                        pass
                 if len(data) <= 3:
                     self.root.after(0, lambda: self.log("TX: ACK", "sent"))
             except Exception as e:
