@@ -144,12 +144,13 @@ class SerialSniffer:
         print("-" * 50)
         print()
 
-    def listen_mode(self, port, baudrate=9600):
+    def listen_mode(self, port, baudrate=9600, auto_ack=True):
         """
         Modo passivo: apenas escuta uma porta.
         """
         print(f"\n{'='*60}")
         print(f"MODO PASSIVO - Escutando {port} @ {baudrate} baud")
+        print(f"Auto-ACK: {'Sim' if auto_ack else 'Não'}")
         print(f"{'='*60}")
         print("Pressione Ctrl+C para parar\n")
 
@@ -164,7 +165,9 @@ class SerialSniffer:
                 bytesize=serial.EIGHTBITS,
                 parity=serial.PARITY_NONE,
                 stopbits=serial.STOPBITS_ONE,
-                timeout=0.1
+                timeout=0.1,
+                rtscts=False,
+                dsrdtr=False
             )
             print(f"Porta {port} aberta com sucesso!\n")
 
@@ -173,8 +176,9 @@ class SerialSniffer:
                 if data:
                     self._log("RX", data, port)
                     # Auto-responder ACK para manter dispositivo feliz
-                    ser.write(b'\x06')
-                    self._log("TX", b'\x06', port)
+                    if auto_ack:
+                        ser.write(b'\x06')
+                        self._log("TX", b'\x06', port)
 
         except serial.SerialException as e:
             print(f"Erro ao abrir porta {port}: {e}")
@@ -303,6 +307,8 @@ Configuração do modo proxy no Windows:
                         help="Baudrate (padrão: 9600)")
     parser.add_argument("--output", "-o", default=".",
                         help="Diretório para salvar logs (padrão: atual)")
+    parser.add_argument("--no-ack", action="store_true",
+                        help="Não responder ACK automaticamente (modo passivo)")
 
     args = parser.parse_args()
 
@@ -311,7 +317,7 @@ Configuração do modo proxy no Windows:
     if args.list:
         sniffer.list_ports()
     elif args.listen:
-        sniffer.listen_mode(args.listen, args.baud)
+        sniffer.listen_mode(args.listen, args.baud, auto_ack=not args.no_ack)
     elif args.proxy:
         sniffer.proxy_mode(args.proxy[0], args.proxy[1], args.baud)
     else:
