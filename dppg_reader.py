@@ -193,12 +193,12 @@ class PPGBlock:
             amplitude_ref = amplitude_vo
             reference_baseline = initial_baseline
 
-        # NÍVEIS DE CRUZAMENTO (calibrado com laudos originais)
-        # Th: 50% de recuperação relativo ao baseline INICIAL
-        level_Th = initial_baseline + amplitude_vo * 0.50
+        # NÍVEIS DE CRUZAMENTO (calibrado com laudos originais + script calibrate.py)
+        # Th: 52% de recuperação relativo ao baseline INICIAL
+        level_Th = initial_baseline + amplitude_vo * 0.48
 
-        # Ti: 90% de recuperação relativo ao baseline de REFERÊNCIA
-        level_Ti = reference_baseline + amplitude_ref * 0.10
+        # Ti: 88% de recuperação relativo ao baseline de REFERÊNCIA
+        level_Ti = reference_baseline + amplitude_ref * 0.12
 
         # To: ~97% de recuperação relativo ao baseline de REFERÊNCIA
         level_To = reference_baseline + amplitude_ref * 0.03
@@ -227,7 +227,7 @@ class PPGBlock:
             return None
 
         # 5. CÁLCULO DE Fo (Venous Refill Surface)
-        # Calibrado com laudos originais: Fo ≈ Vo × Th
+        # Fo = Vo × Th (confirmado pela análise da DLL - unidade %s)
         Fo = Vo * Th
 
         # 6. ÍNDICES PARA VISUALIZAÇÃO
