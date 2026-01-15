@@ -98,8 +98,15 @@ python3 dppg_reader.py
 - **IP**: 192.168.0.234
 - **Porta**: 1100
 - **Auto-ACK**: Ativado (responde automaticamente ao polling)
-- **TST:CHECK**: Ativado por padrão (keep-alive a cada 1s para estabilidade)
+- **Polling**: ENQ por padrão (polling binário a cada 2s para estabilidade)
 - **TCP Keep-Alive**: Habilitado automaticamente (5s no macOS)
+
+### Modos de Polling
+| Modo | Comando | Descrição |
+|------|---------|-----------|
+| **ENQ** | 0x05 | Polling binário - mais compatível com emulação de impressora |
+| **TST:CHECK** | ASCII | Protocolo alternativo para comunicação programática |
+| **Desativado** | - | Apenas responde ao dispositivo (pode perder conexão) |
 
 ## Estrutura do Projeto
 

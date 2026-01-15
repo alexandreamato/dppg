@@ -306,13 +306,19 @@ class DPPGReader:
     SOH = 0x01
     EOT = 0x04
     ACK = 0x06
+    NAK = 0x15
     DLE = 0x10
+    ENQ = 0x05  # Enquiry - usado para polling
+    STX = 0x02  # Start of Text
+    ETX = 0x03  # End of Text
     GS = 0x1D
     CR = 0x0D  # Carriage Return para protocolo ASCII
 
-    # Comandos do protocolo ASCII (TST:CHECK)
-    CMD_CHECK = b"TST:CHECK\r"
-    KEEPALIVE_INTERVAL_MS = 1000  # 1 segundo - keep-alive mais frequente
+    # Comandos de polling
+    CMD_CHECK = b"TST:CHECK\r"  # Protocolo ASCII
+    CMD_ENQ = bytes([0x05])     # Polling binário simples (ENQ)
+    CMD_DLE_ENQ = bytes([0x10, 0x05])  # Polling DLE-framed
+    KEEPALIVE_INTERVAL_MS = 2000  # 2 segundos - polling ativo
 
     def __init__(self):
         self.root = tk.Tk()
@@ -351,8 +357,9 @@ class DPPGReader:
         # Opções de visualização
         self.show_ppg_percent = tk.BooleanVar(value=True)
 
-        # Opção de protocolo de keep-alive
-        self.use_tst_check = tk.BooleanVar(value=True)  # Habilitado por padrão para estabilidade
+        # Opção de protocolo de keep-alive/polling
+        # Modos: "ENQ" (binário), "TST:CHECK" (ASCII), "Desativado"
+        self.polling_mode = tk.StringVar(value="ENQ")  # ENQ é mais compatível
         self.keepalive_timer_id = None
 
         self.setup_ui()
@@ -377,8 +384,10 @@ class DPPGReader:
         self.status_label = ttk.Label(config_frame, text="Desconectado", foreground="red")
         self.status_label.grid(row=0, column=5, padx=10)
 
-        ttk.Checkbutton(config_frame, text="TST:CHECK", variable=self.use_tst_check).grid(row=0, column=6, padx=5)
-        ttk.Label(config_frame, text="(modo direto)", font=("Helvetica", 8)).grid(row=0, column=7, sticky=tk.W)
+        ttk.Label(config_frame, text="Polling:").grid(row=0, column=6, padx=(10, 0))
+        polling_combo = ttk.Combobox(config_frame, textvariable=self.polling_mode,
+                                      values=["ENQ", "TST:CHECK", "Desativado"], width=10, state="readonly")
+        polling_combo.grid(row=0, column=7, padx=5)
 
         # Frame de dados PPG
         data_frame = ttk.LabelFrame(self.root, text="Dados PPG", padding=10)
@@ -1022,24 +1031,33 @@ class DPPGReader:
             self.log(f"Detalhes: {traceback.format_exc()}", "error")
 
     def _send_keepalive(self):
-        """Envia TST:CHECK para manter conexão ativa (protocolo ASCII)"""
-        if not self.connected or not self.socket or not self.use_tst_check.get():
+        """Envia comando de polling para manter conexão ativa"""
+        mode = self.polling_mode.get()
+        if not self.connected or not self.socket or mode == "Desativado":
             return
 
         try:
-            self.socket.send(self.CMD_CHECK)
-            self.log("TX: TST:CHECK", "sent")
+            if mode == "ENQ":
+                # Polling binário - ENQ (0x05)
+                # Mais compatível com modo de emulação de impressora
+                self.socket.send(self.CMD_ENQ)
+                self.log("TX: ENQ (polling)", "sent")
+            elif mode == "TST:CHECK":
+                # Protocolo ASCII alternativo
+                self.socket.send(self.CMD_CHECK)
+                self.log("TX: TST:CHECK", "sent")
         except Exception as e:
-            self.log(f"Erro ao enviar TST:CHECK: {e}", "error")
+            self.log(f"Erro ao enviar polling: {e}", "error")
 
         # Reagendar próximo keepalive
-        if self.connected and self.use_tst_check.get():
+        if self.connected and mode != "Desativado":
             self.keepalive_timer_id = self.root.after(self.KEEPALIVE_INTERVAL_MS, self._send_keepalive)
 
     def _start_keepalive(self):
-        """Inicia o timer de keep-alive TST:CHECK"""
-        if self.use_tst_check.get():
-            self.log("Iniciando keep-alive TST:CHECK (modo direto)", "info")
+        """Inicia o timer de keep-alive/polling"""
+        mode = self.polling_mode.get()
+        if mode != "Desativado":
+            self.log(f"Iniciando polling ativo (modo: {mode}, intervalo: {self.KEEPALIVE_INTERVAL_MS}ms)", "info")
             self._send_keepalive()
 
     def _stop_keepalive(self):
