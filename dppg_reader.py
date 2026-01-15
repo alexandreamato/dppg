@@ -22,16 +22,22 @@ import json
 import os
 
 
-class NumpyEncoder(json.JSONEncoder):
-    """Custom JSON encoder que converte tipos numpy para tipos Python nativos"""
-    def default(self, obj):
-        if isinstance(obj, np.integer):
-            return int(obj)
-        if isinstance(obj, np.floating):
-            return float(obj)
-        if isinstance(obj, np.ndarray):
-            return obj.tolist()
-        return super().default(obj)
+def convert_numpy_types(obj):
+    """Converte recursivamente todos os tipos numpy para tipos Python nativos"""
+    if isinstance(obj, dict):
+        return {key: convert_numpy_types(value) for key, value in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_numpy_types(item) for item in obj]
+    elif isinstance(obj, np.integer):
+        return int(obj)
+    elif isinstance(obj, np.floating):
+        return float(obj)
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, (np.bool_,)):
+        return bool(obj)
+    else:
+        return obj
 
 
 # Mapeamento de labels para descrições (baseado no laudo oficial)
@@ -1021,8 +1027,11 @@ class DPPGReader:
                 "raw_samples": self.raw_samples if self.raw_samples else None
             }
 
+            # Converter todos os tipos numpy recursivamente antes de serializar
+            data = convert_numpy_types(data)
+
             with open(filename, 'w') as f:
-                json.dump(data, f, indent=2, cls=NumpyEncoder)
+                json.dump(data, f, indent=2)
 
             self.log(f"JSON salvo em {filename}", "info")
         except Exception as e:
