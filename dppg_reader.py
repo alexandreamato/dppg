@@ -324,7 +324,7 @@ class DPPGReader:
     CMD_CHECK = b"TST:CHECK\r"  # Protocolo ASCII
     CMD_ENQ = bytes([0x05])     # Polling binário simples (ENQ)
     CMD_DLE_ENQ = bytes([0x10, 0x05])  # Polling DLE-framed
-    KEEPALIVE_INTERVAL_MS = 2000  # 2 segundos - polling ativo
+    KEEPALIVE_INTERVAL_MS = 1500  # 1.5 segundos - polling agressivo
 
     def __init__(self):
         self.root = tk.Tk()
@@ -368,6 +368,11 @@ class DPPGReader:
         self.polling_mode = tk.StringVar(value="ENQ")  # ENQ é mais compatível
         self.keepalive_timer_id = None
 
+        # Auto-reconexão
+        self.auto_reconnect = tk.BooleanVar(value=True)  # Habilitado por padrão
+        self.reconnect_timer_id = None
+        self.reconnect_delay_ms = 3000  # 3 segundos entre tentativas
+
         self.setup_ui()
 
         # Timer para processar dados da queue
@@ -394,6 +399,8 @@ class DPPGReader:
         polling_combo = ttk.Combobox(config_frame, textvariable=self.polling_mode,
                                       values=["ENQ", "TST:CHECK", "Desativado"], width=10, state="readonly")
         polling_combo.grid(row=0, column=7, padx=5)
+
+        ttk.Checkbutton(config_frame, text="Auto-reconectar", variable=self.auto_reconnect).grid(row=0, column=8, padx=10)
 
         # Frame de dados PPG
         data_frame = ttk.LabelFrame(self.root, text="Dados PPG", padding=10)
@@ -1105,6 +1112,9 @@ class DPPGReader:
             except (AttributeError, OSError):
                 pass  # Ignorar se não suportado
 
+            # TCP_NODELAY: desabilitar Nagle para respostas mais rápidas
+            self.socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+
             self.socket.settimeout(5)
             self.socket.connect((host, port))
             self.socket.settimeout(0.5)
@@ -1129,13 +1139,18 @@ class DPPGReader:
         except Exception as e:
             self.log(f"Erro ao conectar: {e}", "error")
 
-    def disconnect(self):
+    def disconnect(self, schedule_reconnect=False):
         self.running = False
         self.connected = False
         self.printer_online = False
 
-        # Parar keep-alive TST:CHECK
+        # Parar keep-alive
         self._stop_keepalive()
+
+        # Cancelar reconexão pendente (se disconnect manual)
+        if not schedule_reconnect and self.reconnect_timer_id:
+            self.root.after_cancel(self.reconnect_timer_id)
+            self.reconnect_timer_id = None
 
         if self.socket:
             try:
@@ -1152,6 +1167,19 @@ class DPPGReader:
         self.status_label.config(text="Desconectado", foreground="red")
         self.log("Desconectado", "info")
 
+        # Agendar reconexão automática se habilitada
+        if schedule_reconnect and self.auto_reconnect.get():
+            self.log(f"Reconectando em {self.reconnect_delay_ms/1000:.1f}s...", "info")
+            self.status_label.config(text="Reconectando...", foreground="orange")
+            self.reconnect_timer_id = self.root.after(self.reconnect_delay_ms, self._attempt_reconnect)
+
+    def _attempt_reconnect(self):
+        """Tenta reconectar automaticamente"""
+        self.reconnect_timer_id = None
+        if not self.connected:
+            self.log("Tentando reconectar...", "info")
+            self.connect()
+
     def receive_loop(self):
         while self.running:
             try:
@@ -1159,13 +1187,16 @@ class DPPGReader:
                 if data:
                     self.process_received_data(data)
                 elif data == b'':
-                    self.root.after(0, self.disconnect)
+                    # Conexão fechada pelo servidor - agendar reconexão
+                    self.root.after(0, lambda: self.disconnect(schedule_reconnect=True))
                     break
             except socket.timeout:
                 continue
             except Exception as e:
                 if self.running:
-                    self.root.after(0, lambda: self.log(f"Erro de recepção: {e}", "error"))
+                    self.root.after(0, lambda err=e: self.log(f"Erro de recepção: {err}", "error"))
+                    # Erro de rede - agendar reconexão
+                    self.root.after(0, lambda: self.disconnect(schedule_reconnect=True))
                 break
 
     def _process_queue(self):
