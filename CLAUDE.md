@@ -193,6 +193,47 @@ O algoritmo foi calibrado com 4 exames do laudo oficial VASOSCREEN. Erro médio 
 
 2. **Extrapolação**: Se o sinal não atinge o nível de cruzamento, valores são extrapolados linearmente.
 
+## Validação das Fórmulas (Engenharia Reversa da DLL)
+
+Análise da biblioteca `dppg_2.dll` do software original Vasoview:
+
+| Parâmetro | Fórmula | Status | Evidências |
+|-----------|---------|--------|------------|
+| **Vo** | `(amplitude/baseline) × 100%` | ✅ Confirmado | Unidade `%`, constante `100.0` |
+| **Th** | `50% de recuperação` | ✅ Confirmado | Constante `0.5` encontrada 11x |
+| **Ti** | `90% de recuperação` | ⚠️ Provável | Inteiro `90` encontrado 4x |
+| **To** | `97% de recuperação` | ⚠️ Provável | Inteiro `97` encontrado 7x |
+| **Fo** | `Vo × Th` | ✅ Confirmado | Unidade `%s` = `% × s` |
+
+### Fórmulas Detalhadas
+
+```
+# Baselines
+initial_baseline = mediana(amostras[0:10])
+stable_baseline  = mediana(amostras[-20:])
+reference_baseline = max(stable_baseline, initial_baseline)
+
+# Amplitudes
+amplitude_vo  = peak_value - initial_baseline
+amplitude_ref = peak_value - reference_baseline
+
+# Parâmetros
+Vo = (amplitude_vo / initial_baseline) × 100%
+Th = tempo até cruzar (initial_baseline + amplitude_vo × 0.50)
+Ti = tempo até cruzar (reference_baseline + amplitude_ref × 0.10)
+To = tempo até cruzar (reference_baseline + amplitude_ref × 0.03)
+Fo = Vo × Th
+```
+
+### Constantes Encontradas na DLL
+
+| Constante | Ocorrências | Uso |
+|-----------|-------------|-----|
+| `0.5` | 11x | Threshold Th (50%) |
+| `100.0` | 1x | Conversão para % |
+| `10`, `20` | janelas | Baseline detection |
+| `90`, `97` | thresholds | Ti e To (provável) |
+
 ## TODO
 
 - [x] Parsear corretamente o protocolo (separar header, dados, metadados)
@@ -207,6 +248,7 @@ O algoritmo foi calibrado com 4 exames do laudo oficial VASOSCREEN. Erro médio 
 - [x] Confirmar taxa de amostragem (4 Hz)
 - [x] Documentar protocolo TST:CHECK alternativo
 - [x] Implementar opção TST:CHECK no aplicativo
+- [x] Validar fórmulas via engenharia reversa da DLL (Vo, Th, Fo confirmados)
 - [ ] Extrair data/hora do exame dos metadados
 - [ ] Identificar label 0xDE (LÞ)
 
