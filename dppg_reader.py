@@ -941,6 +941,10 @@ class DPPGReader:
             blocks_data = []
             for i, b in enumerate(self.ppg_blocks):
                 params = b.calculate_parameters()
+                # Converter para listas Python nativas (evita erros com numpy)
+                samples_list = [int(x) for x in b.samples]
+                samples_raw_list = [int(x) for x in b.samples_raw] if b.trimmed_count > 0 else None
+                ppg_percent_list = [float(x) for x in b.to_ppg_percent()]
                 block_data = {
                     "index": i,
                     "label": f"L{b.label_char}",
@@ -948,22 +952,22 @@ class DPPGReader:
                     "label_desc": b.label_desc,
                     "exam_number": b.exam_number,
                     "timestamp": b.timestamp.isoformat(),
-                    "duration_seconds": b.get_duration_seconds(),
+                    "duration_seconds": float(b.get_duration_seconds()),
                     "sample_count": len(b.samples),
-                    "samples": b.samples,
-                    "samples_ppg_percent": b.to_ppg_percent(),
+                    "samples": samples_list,
+                    "samples_ppg_percent": ppg_percent_list,
                     "trimmed_count": b.trimmed_count,
-                    "samples_raw": b.samples_raw if b.trimmed_count > 0 else None,
+                    "samples_raw": samples_raw_list,
                     "metadata_hex": b.metadata_raw.hex() if b.metadata_raw else None,
                     "parameters": {
-                        "To_s": params.To,
-                        "Th_s": params.Th,
-                        "Ti_s": params.Ti,
-                        "Vo_percent": params.Vo,
-                        "Fo_percent_s": params.Fo,
-                        "peak_index": params.peak_index,
-                        "baseline_adc": params.baseline_value,
-                        "peak_adc": params.peak_value
+                        "To_s": float(params.To),
+                        "Th_s": float(params.Th),
+                        "Ti_s": float(params.Ti),
+                        "Vo_percent": float(params.Vo),
+                        "Fo_percent_s": float(params.Fo),
+                        "peak_index": int(params.peak_index),
+                        "baseline_adc": float(params.baseline_value),
+                        "peak_adc": float(params.peak_value)
                     } if params else None
                 }
                 blocks_data.append(block_data)
@@ -980,7 +984,9 @@ class DPPGReader:
 
             self.log(f"JSON salvo em {filename}", "info")
         except Exception as e:
+            import traceback
             self.log(f"Erro ao salvar JSON: {e}", "error")
+            self.log(f"Detalhes: {traceback.format_exc()}", "error")
 
     def _send_keepalive(self):
         """Envia TST:CHECK para manter conexão ativa (protocolo ASCII)"""
@@ -1118,8 +1124,9 @@ class DPPGReader:
             hex_preview += "..."
         self.root.after(0, lambda d=data, h=hex_preview: self.log(f"RX ({len(d)} bytes): {h}", "received"))
 
-        # Auto-ACK: responder com ACK apenas no modo impressora (não no modo TST:CHECK)
-        if self.socket and not self.use_tst_check.get():
+        # Auto-ACK: SEMPRE responder com ACK para manter impressora "online"
+        # O ACK é necessário para o protocolo de impressora, independente do TST:CHECK
+        if self.socket:
             try:
                 self.socket.send(b'\x06')
                 if len(data) <= 3:
