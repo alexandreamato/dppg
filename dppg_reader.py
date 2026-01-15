@@ -803,15 +803,27 @@ class DPPGReader:
             max_val = max(8, max_val)
             val_range = max_val - min_val
 
-        # Duração em segundos
-        duration = block.get_duration_seconds()
+        # Calcular parâmetros para obter índice do pico (t=0)
+        params = block.calculate_parameters()
+        peak_idx = params.peak_index if params else len(samples) // 4
+
+        # Tempo relativo ao pico: pico = 0s, antes = negativo, depois = positivo
+        sample_time = 1.0 / ESTIMATED_SAMPLING_RATE
+        time_at_start = -peak_idx * sample_time  # Tempo no início (negativo)
+        time_at_end = (len(samples) - 1 - peak_idx) * sample_time  # Tempo no fim (positivo)
 
         # Função para converter valor em coordenada Y
         def val_to_y(val):
             return 10 + plot_height - ((val - min_val) / val_range) * plot_height
 
-        # Função para converter índice em coordenada X (tempo)
+        # Função para converter índice em coordenada X (tempo relativo ao pico)
         def idx_to_x(idx):
+            return margin_left + (idx / len(samples)) * plot_width
+
+        # Função para converter tempo relativo em coordenada X
+        def time_to_x(t):
+            # t=0 está no pico, que está em peak_idx
+            idx = peak_idx + t * ESTIMATED_SAMPLING_RATE
             return margin_left + (idx / len(samples)) * plot_width
 
         # Desenhar escala vertical (eixo Y)
@@ -833,15 +845,26 @@ class DPPGReader:
         self.canvas.create_text(10, height / 2, anchor="w", angle=90,
                                 text=y_label, font=("Courier", 8), fill="gray")
 
-        # Desenhar escala horizontal (eixo X - tempo)
+        # Desenhar escala horizontal (eixo X - tempo relativo ao pico)
         self.canvas.create_line(margin_left, height - margin_bottom, width - 20, height - margin_bottom, fill="gray")
-        num_x_ticks = 6
-        for i in range(num_x_ticks + 1):
-            time_val = duration * i / num_x_ticks
-            x = margin_left + (i / num_x_ticks) * plot_width
-            self.canvas.create_line(x, height - margin_bottom, x, height - margin_bottom + 5, fill="gray")
-            self.canvas.create_text(x, height - margin_bottom + 8, anchor="n",
-                                    text=f"{time_val:.0f}s", font=("Courier", 8), fill="gray")
+
+        # Calcular ticks de tempo (relativo ao pico = 0s)
+        # Arredondar para múltiplos de 5 ou 10
+        time_range = time_at_end - time_at_start
+        tick_interval = 10 if time_range > 40 else 5
+        first_tick = int(time_at_start / tick_interval) * tick_interval
+        last_tick = int(time_at_end / tick_interval + 1) * tick_interval
+
+        for t in range(first_tick, last_tick + 1, tick_interval):
+            if time_at_start <= t <= time_at_end:
+                x = time_to_x(t)
+                self.canvas.create_line(x, height - margin_bottom, x, height - margin_bottom + 5, fill="gray")
+                self.canvas.create_text(x, height - margin_bottom + 8, anchor="n",
+                                        text=f"{t}s", font=("Courier", 8), fill="gray")
+
+        # Desenhar linha vertical em t=0 (pico)
+        x_zero = time_to_x(0)
+        self.canvas.create_line(x_zero, 10, x_zero, height - margin_bottom, fill="red", dash=(3, 3))
 
         # Desenhar sinal PPG
         points = []
@@ -853,11 +876,9 @@ class DPPGReader:
         if len(points) >= 4:
             self.canvas.create_line(points, fill="blue", width=2)
 
-        # Calcular parâmetros para obter índices dos marcadores
-        params = block.calculate_parameters()
-
+        # Desenhar marcadores se temos parâmetros
         if params:
-            # Desenhar X vermelho no PICO (momento zero, início do decaimento)
+            # Desenhar X vermelho no PICO (t=0)
             peak_x = idx_to_x(params.peak_index)
             peak_y = val_to_y(samples[params.peak_index])
             x_size = 6
@@ -867,10 +888,9 @@ class DPPGReader:
             self.canvas.create_line(peak_x - x_size, peak_y + x_size,
                                    peak_x + x_size, peak_y - x_size,
                                    fill="red", width=2)
-            # Label do pico
-            peak_time = params.peak_index / ESTIMATED_SAMPLING_RATE
+            # Label do pico (t=0)
             self.canvas.create_text(peak_x, peak_y - 12, anchor="s",
-                                   text=f"Pico ({peak_time:.1f}s)",
+                                   text="t=0",
                                    font=("Courier", 7), fill="red")
 
             # Desenhar X verde no FIM DO To (retorno ao baseline)
@@ -883,16 +903,17 @@ class DPPGReader:
             self.canvas.create_line(to_end_x - x_size, to_end_y + x_size,
                                    to_end_x + x_size, to_end_y - x_size,
                                    fill="green", width=2)
-            # Label do fim To
-            to_end_time = to_end_idx / ESTIMATED_SAMPLING_RATE
+            # Label do fim To (tempo relativo ao pico)
+            to_relative_time = (to_end_idx - params.peak_index) / ESTIMATED_SAMPLING_RATE
             self.canvas.create_text(to_end_x, to_end_y - 12, anchor="s",
-                                   text=f"To ({to_end_time:.1f}s)",
+                                   text=f"To={to_relative_time:.1f}s",
                                    font=("Courier", 7), fill="green")
 
         # Mostrar estatísticas no topo
         exam_str = f" | #{block.exam_number}" if block.exam_number else ""
         desc_str = f" ({block.label_desc})" if block.label_desc != "Desconhecido" else ""
         trim_str = f" | {block.trimmed_count} rem." if block.trimmed_count > 0 else ""
+        duration = block.get_duration_seconds()
         duration_str = f" | {duration:.1f}s"
         params_str = f" | To={params.To}s Vo={params.Vo}%" if params else ""
         self.canvas.create_text(margin_left + 5, 3, anchor="nw",
@@ -941,22 +962,22 @@ class DPPGReader:
             blocks_data = []
             for i, b in enumerate(self.ppg_blocks):
                 params = b.calculate_parameters()
-                # Converter para listas Python nativas (evita erros com numpy)
+                # Converter TUDO para tipos Python nativos (evita erros com numpy int64/float64)
                 samples_list = [int(x) for x in b.samples]
                 samples_raw_list = [int(x) for x in b.samples_raw] if b.trimmed_count > 0 else None
                 ppg_percent_list = [float(x) for x in b.to_ppg_percent()]
                 block_data = {
-                    "index": i,
+                    "index": int(i),
                     "label": f"L{b.label_char}",
-                    "label_byte": b.label_byte,
-                    "label_desc": b.label_desc,
-                    "exam_number": b.exam_number,
+                    "label_byte": int(b.label_byte),
+                    "label_desc": str(b.label_desc),
+                    "exam_number": int(b.exam_number) if b.exam_number else None,
                     "timestamp": b.timestamp.isoformat(),
                     "duration_seconds": float(b.get_duration_seconds()),
-                    "sample_count": len(b.samples),
+                    "sample_count": int(len(b.samples)),
                     "samples": samples_list,
                     "samples_ppg_percent": ppg_percent_list,
-                    "trimmed_count": b.trimmed_count,
+                    "trimmed_count": int(b.trimmed_count),
                     "samples_raw": samples_raw_list,
                     "metadata_hex": b.metadata_raw.hex() if b.metadata_raw else None,
                     "parameters": {
