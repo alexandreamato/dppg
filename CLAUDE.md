@@ -177,15 +177,15 @@ block,exam_number,label,sample_index,value
 
 ## Precisão dos Cálculos
 
-O algoritmo foi calibrado com 4 exames do laudo oficial VASOSCREEN. Erro médio geral: **~7.7%**
+O algoritmo foi calibrado com 4 exames do laudo oficial VASOSCREEN. Erro médio geral: **~6.9%**
 
 | Parâmetro | Erro Médio | Observação |
 |-----------|------------|------------|
 | **Vo** | ~2.5% | Excelente - cálculo direto da amplitude |
-| **Ti** | ~5.7% | Bom - usa 90% de recuperação |
+| **Ti** | ~5.2% | Bom - usa 88% de recuperação |
 | **To** | ~5.8% | Bom - usa 97% de recuperação |
-| **Th** | ~11.1% | Aceitável - usa 50% de recuperação |
-| **Fo** | ~13.6% | Aceitável - derivado (Fo = Vo × Th) |
+| **Th** | ~10.0% | Aceitável - usa 52% de recuperação |
+| **Fo** | ~11.0% | Aceitável - derivado (Fo = Vo × Th) |
 
 ### Limitações Conhecidas
 
