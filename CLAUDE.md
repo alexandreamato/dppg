@@ -98,15 +98,18 @@ python3 dppg_reader.py
 - **IP**: 192.168.0.234
 - **Porta**: 1100
 - **Auto-ACK**: Ativado (responde automaticamente ao polling)
-- **TST:CHECK**: Desativado (modo alternativo de keep-alive)
+- **TST:CHECK**: Ativado por padrão (keep-alive a cada 1s para estabilidade)
+- **TCP Keep-Alive**: Habilitado automaticamente (5s no macOS)
 
 ## Estrutura do Projeto
 
 ```
 dppg/
 ├── CLAUDE.md           # Esta documentação
+├── PROTOCOL.md         # Documentação detalhada do protocolo
 ├── dppg_reader.py      # Aplicativo principal com GUI
-└── ppg_data_*.csv      # Arquivos de dados exportados
+├── calibrate.py        # Script de calibração de parâmetros
+└── ppg_data_*.csv/json # Arquivos de dados exportados
 ```
 
 ## Parâmetros Quantitativos
@@ -205,7 +208,7 @@ Análise da biblioteca `dppg_2.dll` do software original Vasoview:
 | **To** | `97% de recuperação` | ⚠️ Provável | Inteiro `97` encontrado 7x |
 | **Fo** | `Vo × Th` | ✅ Confirmado | Unidade `%s` = `% × s` |
 
-### Fórmulas Detalhadas
+### Fórmulas Detalhadas (Calibradas)
 
 ```
 # Baselines
@@ -217,11 +220,11 @@ reference_baseline = max(stable_baseline, initial_baseline)
 amplitude_vo  = peak_value - initial_baseline
 amplitude_ref = peak_value - reference_baseline
 
-# Parâmetros
+# Parâmetros (thresholds calibrados com laudos originais)
 Vo = (amplitude_vo / initial_baseline) × 100%
-Th = tempo até cruzar (initial_baseline + amplitude_vo × 0.50)
-Ti = tempo até cruzar (reference_baseline + amplitude_ref × 0.10)
-To = tempo até cruzar (reference_baseline + amplitude_ref × 0.03)
+Th = tempo até cruzar (initial_baseline + amplitude_vo × 0.48)   # 52% recuperação
+Ti = tempo até cruzar (reference_baseline + amplitude_ref × 0.12) # 88% recuperação
+To = tempo até cruzar (reference_baseline + amplitude_ref × 0.03) # 97% recuperação
 Fo = Vo × Th
 ```
 
@@ -244,13 +247,14 @@ Fo = Vo × Th
 - [x] Documentar significado dos diferentes labels (Lâ, Lá, etc.)
 - [x] Calcular parâmetros quantitativos (To, Th, Ti, Vo, Fo)
 - [x] Gráfico diagnóstico Vo% × To(s)
-- [x] Calibrar algoritmo com laudos originais (erro médio ~7.7%)
+- [x] Calibrar algoritmo com laudos originais (erro médio ~6.9%)
 - [x] Confirmar taxa de amostragem (4 Hz)
 - [x] Documentar protocolo TST:CHECK alternativo
 - [x] Implementar opção TST:CHECK no aplicativo
 - [x] Validar fórmulas via engenharia reversa da DLL (Vo, Th, Fo confirmados)
+- [x] Melhorar estabilidade de conexão (TCP keep-alive + TST:CHECK padrão)
 - [ ] Extrair data/hora do exame dos metadados
-- [ ] Identificar label 0xDE (LÞ)
+- [ ] Identificar labels adicionais (0xDE=Canal 5, 0xDA, 0xD9, etc.)
 
 ## Referências
 
