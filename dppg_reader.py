@@ -12,6 +12,7 @@ Configuração padrão:
 import socket
 import threading
 import queue
+import time
 import tkinter as tk
 from tkinter import ttk, scrolledtext
 from datetime import datetime
@@ -22,22 +23,20 @@ import json
 import os
 
 
-def convert_numpy_types(obj):
-    """Converte recursivamente todos os tipos numpy para tipos Python nativos"""
-    if isinstance(obj, dict):
-        return {key: convert_numpy_types(value) for key, value in obj.items()}
-    elif isinstance(obj, list):
-        return [convert_numpy_types(item) for item in obj]
-    elif isinstance(obj, np.integer):
-        return int(obj)
-    elif isinstance(obj, np.floating):
-        return float(obj)
-    elif isinstance(obj, np.ndarray):
-        return obj.tolist()
-    elif isinstance(obj, (np.bool_,)):
-        return bool(obj)
-    else:
-        return obj
+class NumpyJSONEncoder(json.JSONEncoder):
+    """Encoder JSON que converte automaticamente tipos numpy para tipos Python nativos"""
+    def default(self, obj):
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        if isinstance(obj, (np.integer, np.int64, np.int32, np.int16, np.int8)):
+            return int(obj)
+        if isinstance(obj, (np.floating, np.float64, np.float32)):
+            return float(obj)
+        if isinstance(obj, (np.bool_, np.bool8)):
+            return bool(obj)
+        if hasattr(obj, 'item'):
+            return obj.item()
+        return super().default(obj)
 
 
 # Mapeamento de labels para descrições (baseado no laudo oficial)
@@ -169,23 +168,52 @@ class PPGBlock:
 
         # 1. BASELINES
         # Inicial: antes do exercício (para Vo)
-        initial_baseline = np.median(samples[:10])
+        initial_baseline = float(np.median(samples[:10]))
         # Estável: valor final (para tempos de recuperação)
-        stable_baseline = np.median(samples[-20:])
+        stable_baseline = float(np.median(samples[-20:]))
 
         # 2. DETECÇÃO DO PICO
-        window = 5
-        smoothed = np.convolve(samples, np.ones(window)/window, mode='valid')
-        offset = (window - 1) // 2
+        # O pico ocorre no final do exercício de dorsiflexão.
+        # Usamos duas estratégias dependendo da amplitude do sinal:
+        # - Alta amplitude: suavização para evitar ruído
+        # - Baixa amplitude: máximo global na janela de exercício
 
-        search_start = max(10, int(len(smoothed) * 0.1))
-        search_end = int(len(smoothed) * 0.9)
-        if search_start >= search_end:
+        # Primeiro, estimar amplitude para escolher método
+        global_max = float(np.max(samples))
+        estimated_amplitude = global_max - initial_baseline
+
+        # Janela típica de exercício: 5-25 segundos (índices 20-100 a 4Hz)
+        exercise_start = 5
+        exercise_end = min(25 * int(ESTIMATED_SAMPLING_RATE), len(samples) - 10)
+
+        if exercise_end <= exercise_start:
             return None
 
-        peak_idx_smooth = np.argmax(smoothed[search_start:search_end]) + search_start
-        peak_idx = peak_idx_smooth + offset
-        peak_value = samples[peak_idx]
+        # Para sinais de baixa amplitude (< 3% Vo), usar máximo na janela de exercício
+        # pois a suavização pode esconder picos isolados
+        estimated_vo = (estimated_amplitude / initial_baseline) * 100.0 if initial_baseline > 0 else 0
+
+        if estimated_vo < 3.0:
+            # Baixa amplitude: usar máximo global na janela de exercício
+            peak_idx = int(exercise_start + np.argmax(samples[exercise_start:exercise_end]))
+        else:
+            # Alta amplitude: usar suavização para robustez
+            window = 5
+            smoothed = np.convolve(samples, np.ones(window)/window, mode='valid')
+            offset = (window - 1) // 2
+
+            # Buscar pico na região central (10% a 90% do sinal)
+            search_start = max(10, int(len(smoothed) * 0.1))
+            search_end = int(len(smoothed) * 0.9)
+
+            if search_end <= search_start:
+                return None
+
+            peak_idx_smooth = int(np.argmax(smoothed[search_start:search_end]) + search_start)
+            peak_idx = peak_idx_smooth + offset
+
+        peak_idx = min(peak_idx, len(samples) - 1)  # Garantir índice válido
+        peak_value = float(samples[peak_idx])
 
         # 3. CÁLCULO DE Vo (% do baseline INICIAL)
         amplitude_vo = peak_value - initial_baseline
@@ -211,14 +239,14 @@ class PPGBlock:
             amplitude_ref = amplitude_vo
             reference_baseline = initial_baseline
 
-        # NÍVEIS DE CRUZAMENTO (calibrado com laudos originais + script calibrate.py)
-        # Th: 52% de recuperação relativo ao baseline INICIAL
-        level_Th = initial_baseline + amplitude_vo * 0.48
+        # NÍVEIS DE CRUZAMENTO (extraído via disassembly da DLL dppg_2.dll)
+        # Th: 50% de recuperação relativo ao baseline INICIAL
+        level_Th = initial_baseline + amplitude_vo * 0.50
 
-        # Ti: 88% de recuperação relativo ao baseline de REFERÊNCIA
-        level_Ti = reference_baseline + amplitude_ref * 0.12
+        # Ti: 87.5% de recuperação relativo ao baseline de REFERÊNCIA (12.5% restante)
+        level_Ti = reference_baseline + amplitude_ref * 0.125
 
-        # To: ~97% de recuperação relativo ao baseline de REFERÊNCIA
+        # To: 97% de recuperação relativo ao baseline de REFERÊNCIA (3% restante)
         level_To = reference_baseline + amplitude_ref * 0.03
 
         # Encontrar cruzamentos
@@ -324,7 +352,10 @@ class DPPGReader:
     CMD_CHECK = b"TST:CHECK\r"  # Protocolo ASCII
     CMD_ENQ = bytes([0x05])     # Polling binário simples (ENQ)
     CMD_DLE_ENQ = bytes([0x10, 0x05])  # Polling DLE-framed
-    KEEPALIVE_INTERVAL_MS = 1500  # 1.5 segundos - polling agressivo
+    # Baseado na análise do API Monitor: Vasoview usa timeouts muito longos/infinitos
+    # e não faz polling ativo - apenas responde ao polling DLE do dispositivo
+    KEEPALIVE_INTERVAL_MS = 5000  # 5 segundos - polling passivo (só se necessário)
+    SOCKET_TIMEOUT = 3.0  # 3 segundos - timeout maior para reads mais estáveis
 
     def __init__(self):
         self.root = tk.Tk()
@@ -364,14 +395,19 @@ class DPPGReader:
         self.show_ppg_percent = tk.BooleanVar(value=True)
 
         # Opção de protocolo de keep-alive/polling
-        # Modos: "ENQ" (binário), "TST:CHECK" (ASCII), "Desativado"
-        self.polling_mode = tk.StringVar(value="ENQ")  # ENQ é mais compatível
+        # Modos: "Passivo" (só ACK), "ENQ" (binário), "TST:CHECK" (ASCII), "Desativado"
+        # Baseado na análise do Vasoview: modo passivo é mais estável
+        self.polling_mode = tk.StringVar(value="Passivo")  # Passivo = sem polling, só ACK
         self.keepalive_timer_id = None
 
         # Auto-reconexão
         self.auto_reconnect = tk.BooleanVar(value=True)  # Habilitado por padrão
         self.reconnect_timer_id = None
         self.reconnect_delay_ms = 3000  # 3 segundos entre tentativas
+
+        # Debug: pausa do auto-ACK para testes
+        self.auto_ack_paused = False
+        self.auto_ack_resume_time = None
 
         self.setup_ui()
 
@@ -397,7 +433,7 @@ class DPPGReader:
 
         ttk.Label(config_frame, text="Polling:").grid(row=0, column=6, padx=(10, 0))
         polling_combo = ttk.Combobox(config_frame, textvariable=self.polling_mode,
-                                      values=["ENQ", "TST:CHECK", "Desativado"], width=10, state="readonly")
+                                      values=["Passivo", "ENQ", "TST:CHECK", "Desativado"], width=10, state="readonly")
         polling_combo.grid(row=0, column=7, padx=5)
 
         ttk.Checkbutton(config_frame, text="Auto-reconectar", variable=self.auto_reconnect).grid(row=0, column=8, padx=10)
@@ -459,6 +495,107 @@ class DPPGReader:
         self.log_text.tag_config("error", foreground="red")
         self.log_text.tag_config("data", foreground="orange")
         self.log_text.tag_config("block", foreground="purple")
+
+        # ============================================================
+        # PAINEL DE DEBUG - Teste de comandos do protocolo
+        # ============================================================
+        debug_frame = ttk.LabelFrame(self.root, text="Debug - Teste de Comandos (observe o display do aparelho)", padding=10)
+        debug_frame.pack(fill=tk.X, padx=10, pady=5)
+
+        # Linha 1: Protocolo DLE/ACK (modo impressora) - FUNCIONA
+        row1 = ttk.Frame(debug_frame)
+        row1.pack(fill=tk.X, pady=2)
+
+        ttk.Label(row1, text="DLE/ACK:", width=10).pack(side=tk.LEFT)
+        ttk.Label(row1, text="(só ACK após DLE!)", foreground="gray").pack(side=tk.LEFT)
+
+        ttk.Button(row1, text="ACK (0x06)", width=12,
+                   command=lambda: self.debug_send(b'\x06', "ACK")).pack(side=tk.LEFT, padx=2)
+        ttk.Button(row1, text="NAK (0x15)", width=12,
+                   command=lambda: self.debug_send(b'\x15', "NAK ⚠offline")).pack(side=tk.LEFT, padx=2)
+        ttk.Button(row1, text="DLE (0x10)", width=12,
+                   command=lambda: self.debug_send(b'\x10', "DLE ⚠offline")).pack(side=tk.LEFT, padx=2)
+        ttk.Button(row1, text="ENQ (0x05)", width=12,
+                   command=lambda: self.debug_send(b'\x05', "ENQ ⚠offline")).pack(side=tk.LEFT, padx=2)
+        ttk.Button(row1, text="EOT (0x04)", width=12,
+                   command=lambda: self.debug_send(b'\x04', "EOT ⚠offline")).pack(side=tk.LEFT, padx=2)
+
+        # Linha 2: Protocolo STX/ETX (modo VL320) - da análise da DLL
+        row2 = ttk.Frame(debug_frame)
+        row2.pack(fill=tk.X, pady=2)
+
+        ttk.Label(row2, text="STX/ETX:", width=10).pack(side=tk.LEFT)
+        ttk.Label(row2, text="(pacotes binários)", foreground="gray").pack(side=tk.LEFT)
+
+        ttk.Button(row2, text="STX+NULL+ETX", width=14,
+                   command=lambda: self.debug_send(b'\x02\x00\x03', "Keep-alive")).pack(side=tk.LEFT, padx=2)
+        ttk.Button(row2, text="STX+ACK+ETX", width=14,
+                   command=lambda: self.debug_send(b'\x02\x06\x03', "ACK binário")).pack(side=tk.LEFT, padx=2)
+        ttk.Button(row2, text="STX+ENQ+ETX", width=14,
+                   command=lambda: self.debug_send(b'\x02\x05\x03', "ENQ binário")).pack(side=tk.LEFT, padx=2)
+        ttk.Button(row2, text="STX+QRY+ETX", width=14,
+                   command=lambda: self.debug_send(b'\x02QRY\x03', "Query")).pack(side=tk.LEFT, padx=2)
+        ttk.Button(row2, text="STX+EOT+ETX", width=14,
+                   command=lambda: self.debug_send(b'\x02\x04\x03', "EOT binário")).pack(side=tk.LEFT, padx=2)
+
+        # Linha 3: Comandos ASCII (terminados por CR=0x0D, não \r)
+        row3 = ttk.Frame(debug_frame)
+        row3.pack(fill=tk.X, pady=2)
+
+        ttk.Label(row3, text="ASCII+CR:", width=10).pack(side=tk.LEFT)
+        ttk.Label(row3, text="(CR=0x0D)", foreground="gray").pack(side=tk.LEFT)
+
+        ttk.Button(row3, text="TST:CHECK", width=12,
+                   command=lambda: self.debug_send(b'TST:CHECK\x0D', "TST:CHECK+CR")).pack(side=tk.LEFT, padx=2)
+        ttk.Button(row3, text="MSG:STAT/0", width=12,
+                   command=lambda: self.debug_send(b'MSG:STAT/0\x0D', "MSG:STAT/0+CR")).pack(side=tk.LEFT, padx=2)
+        ttk.Button(row3, text="MSG:STAT/4", width=12,
+                   command=lambda: self.debug_send(b'MSG:STAT/4\x0D', "MSG:STAT/4+CR")).pack(side=tk.LEFT, padx=2)
+        ttk.Button(row3, text="ACQ:START", width=12,
+                   command=lambda: self.debug_send(b'ACQ:START\x0D', "ACQ:START+CR")).pack(side=tk.LEFT, padx=2)
+        ttk.Button(row3, text="ACQ:STOP", width=12,
+                   command=lambda: self.debug_send(b'ACQ:STOP\x0D', "ACQ:STOP+CR")).pack(side=tk.LEFT, padx=2)
+
+        # Linha 4: Entrada customizada
+        row4 = ttk.Frame(debug_frame)
+        row4.pack(fill=tk.X, pady=2)
+
+        ttk.Label(row4, text="Custom:", width=10).pack(side=tk.LEFT)
+
+        self.debug_hex_entry = ttk.Entry(row4, width=25)
+        self.debug_hex_entry.pack(side=tk.LEFT, padx=2)
+        self.debug_hex_entry.insert(0, "02 00 03")  # Keep-alive por padrão
+
+        ttk.Button(row4, text="Enviar HEX", width=10,
+                   command=self.debug_send_custom_hex).pack(side=tk.LEFT, padx=2)
+
+        self.debug_ascii_entry = ttk.Entry(row4, width=25)
+        self.debug_ascii_entry.pack(side=tk.LEFT, padx=2)
+        self.debug_ascii_entry.insert(0, "TST:CHECK")
+
+        ttk.Button(row4, text="ASCII+CR", width=10,
+                   command=self.debug_send_custom_ascii).pack(side=tk.LEFT, padx=2)
+
+        ttk.Button(row4, text="STX+ASCII+ETX", width=12,
+                   command=self.debug_send_custom_stx_etx).pack(side=tk.LEFT, padx=2)
+
+        # Linha 5: Status e informações
+        row5 = ttk.Frame(debug_frame)
+        row5.pack(fill=tk.X, pady=2)
+
+        ttk.Label(row5, text="Info:", width=10).pack(side=tk.LEFT)
+
+        self.debug_last_rx = ttk.Label(row5, text="Último RX: -", font=("Courier", 9))
+        self.debug_last_rx.pack(side=tk.LEFT, padx=5)
+
+        self.debug_last_tx = ttk.Label(row5, text="Último TX: -", font=("Courier", 9))
+        self.debug_last_tx.pack(side=tk.LEFT, padx=5)
+
+        ttk.Button(row5, text="Pausar ACK 10s", width=14,
+                   command=self.debug_pause_auto_ack).pack(side=tk.LEFT, padx=5)
+
+        ttk.Button(row5, text="Pausar ACK 30s", width=14,
+                   command=lambda: self.debug_pause_auto_ack(30)).pack(side=tk.LEFT, padx=5)
 
         # Frame de visualização de dados PPG
         ppg_frame = ttk.LabelFrame(self.root, text="Visualização PPG", padding=10)
@@ -1060,11 +1197,9 @@ class DPPGReader:
                 "raw_samples": self.raw_samples if self.raw_samples else None
             }
 
-            # Converter todos os tipos numpy recursivamente antes de serializar
-            data = convert_numpy_types(data)
-
+            # Usar encoder customizado para converter tipos numpy automaticamente
             with open(filename, 'w') as f:
-                json.dump(data, f, indent=2)
+                json.dump(data, f, indent=2, cls=NumpyJSONEncoder)
 
             self.log(f"JSON salvo em {filename}", "info")
         except Exception as e:
@@ -1072,10 +1207,73 @@ class DPPGReader:
             self.log(f"Erro ao salvar JSON: {e}", "error")
             self.log(f"Detalhes: {traceback.format_exc()}", "error")
 
+    # ============================================================
+    # FUNÇÕES DE DEBUG - Teste de comandos do protocolo
+    # ============================================================
+
+    def debug_send(self, data: bytes, description: str):
+        """Envia dados de debug e registra no log"""
+        if not self.connected or not self.socket:
+            self.log("Não conectado - conecte primeiro", "error")
+            return
+
+        try:
+            self.socket.send(data)
+            hex_str = ' '.join(f'{b:02X}' for b in data)
+            self.log(f"DEBUG TX: {description} [{hex_str}]", "sent")
+            self.debug_last_tx.config(text=f"Último TX: {description} [{hex_str}]")
+        except Exception as e:
+            self.log(f"Erro ao enviar debug: {e}", "error")
+
+    def debug_send_custom_hex(self):
+        """Envia bytes customizados em formato hexadecimal"""
+        hex_str = self.debug_hex_entry.get().strip()
+        try:
+            # Remover espaços e converter para bytes
+            hex_str = hex_str.replace(' ', '').replace('0x', '').replace(',', '')
+            data = bytes.fromhex(hex_str)
+            self.debug_send(data, f"Custom HEX ({len(data)} bytes)")
+        except ValueError as e:
+            self.log(f"HEX inválido: {e}", "error")
+
+    def debug_send_custom_ascii(self):
+        """Envia texto ASCII customizado + CR (0x0D)"""
+        text = self.debug_ascii_entry.get()
+        data = text.encode('ascii') + b'\x0D'  # CR = 0x0D (não \r)
+        self.debug_send(data, f"ASCII+CR: {text}")
+
+    def debug_send_custom_stx_etx(self):
+        """Envia texto ASCII envolvido em STX/ETX"""
+        text = self.debug_ascii_entry.get()
+        data = b'\x02' + text.encode('ascii') + b'\x03'  # STX + texto + ETX
+        self.debug_send(data, f"STX+{text}+ETX")
+
+    def debug_pause_auto_ack(self, seconds=10):
+        """Pausa o envio automático de ACK por N segundos"""
+        self.auto_ack_paused = True
+        self.auto_ack_resume_time = time.time() + seconds
+        self.log(f"Auto-ACK PAUSADO por {seconds} segundos - observe o display do aparelho", "info")
+        self.root.after(seconds * 1000, self._resume_auto_ack)
+
+    def _resume_auto_ack(self):
+        """Retoma o envio automático de ACK"""
+        self.auto_ack_paused = False
+        self.auto_ack_resume_time = None
+        self.log("Auto-ACK RETOMADO", "info")
+
+    def debug_update_last_rx(self, data: bytes):
+        """Atualiza o display do último dado recebido"""
+        if len(data) <= 20:
+            hex_str = ' '.join(f'{b:02X}' for b in data)
+        else:
+            hex_str = ' '.join(f'{b:02X}' for b in data[:20]) + '...'
+        self.debug_last_rx.config(text=f"Último RX: [{hex_str}] ({len(data)} bytes)")
+
     def _send_keepalive(self):
         """Envia comando de polling para manter conexão ativa"""
         mode = self.polling_mode.get()
-        if not self.connected or not self.socket or mode == "Desativado":
+        # Passivo e Desativado: não enviar nada
+        if not self.connected or not self.socket or mode in ["Desativado", "Passivo"]:
             return
 
         try:
@@ -1091,15 +1289,19 @@ class DPPGReader:
         except Exception as e:
             self.log(f"Erro ao enviar polling: {e}", "error")
 
-        # Reagendar próximo keepalive
-        if self.connected and mode != "Desativado":
+        # Reagendar próximo keepalive (apenas para modos ativos)
+        if self.connected and mode not in ["Desativado", "Passivo"]:
             self.keepalive_timer_id = self.root.after(self.KEEPALIVE_INTERVAL_MS, self._send_keepalive)
 
     def _start_keepalive(self):
         """Inicia o timer de keep-alive/polling"""
         mode = self.polling_mode.get()
-        if mode != "Desativado":
-            self.log(f"Iniciando polling ativo (modo: {mode}, intervalo: {self.KEEPALIVE_INTERVAL_MS}ms)", "info")
+        if mode == "Passivo":
+            # Modo passivo: baseado na análise do Vasoview, não faz polling ativo
+            # Apenas responde ACK quando recebe dados (tratado em process_received_data)
+            self.log("Modo passivo: aguardando polling do dispositivo (DLE)", "info")
+        elif mode != "Desativado":
+            self.log(f"Iniciando polling ativo (modo: {mode}, intervalo: {self.KEEPALIVE_INTERVAL_MS/1000:.1f}s)", "info")
             self._send_keepalive()
 
     def _stop_keepalive(self):
@@ -1143,7 +1345,9 @@ class DPPGReader:
 
             self.socket.settimeout(5)
             self.socket.connect((host, port))
-            self.socket.settimeout(0.5)
+            # Baseado na análise do Vasoview: usar timeout maior para reads mais estáveis
+            # Vasoview usa timeouts infinitos, mas 3s é um bom compromisso
+            self.socket.settimeout(self.SOCKET_TIMEOUT)
 
             self.connected = True
             self.running = True
@@ -1270,9 +1474,13 @@ class DPPGReader:
             hex_preview += "..."
         self.root.after(0, lambda d=data, h=hex_preview: self.log(f"RX ({len(d)} bytes): {h}", "received"))
 
+        # Atualizar display de debug
+        self.root.after(0, lambda d=data: self.debug_update_last_rx(d))
+
         # Auto-ACK: SEMPRE responder com ACK para manter impressora "online"
         # O ACK é necessário para o protocolo de impressora, independente do TST:CHECK
-        if self.socket:
+        # A menos que o modo de debug tenha pausado o auto-ACK
+        if self.socket and not self.auto_ack_paused:
             try:
                 self.socket.send(b'\x06')
                 # Captura bruta - salvar TX também
@@ -1290,6 +1498,8 @@ class DPPGReader:
                     self.root.after(0, lambda: self.log("TX: ACK", "sent"))
             except Exception as e:
                 self.root.after(0, lambda e=e: self.log(f"Erro ao enviar ACK: {e}", "error"))
+        elif self.auto_ack_paused:
+            self.root.after(0, lambda: self.log("Auto-ACK pausado - NÃO enviando ACK", "info"))
 
         # Adicionar à queue (thread-safe)
         self.data_queue.put(bytes(data))

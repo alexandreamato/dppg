@@ -7,7 +7,26 @@ Documentação da engenharia reversa do protocolo serial do aparelho D-PPG Elcat
 ## Status: Em Investigação
 
 **Data início**: 2026-01-14
-**Versão**: 0.1
+**Versão**: 0.2 (atualizado 2026-01-15)
+
+---
+
+## IMPORTANTE: Descobertas do Teste de Protocolo
+
+### Comportamento Testado (2026-01-15)
+
+| Comando | Quando Online | Quando Offline |
+|---------|--------------|----------------|
+| ACK (0x06) | ✅ Funciona **APENAS após receber DLE** | Sem efeito |
+| ACK (0x06) sozinho | ⚠️ Causa OFFLINE | - |
+| NAK (0x15) | ⚠️ Causa OFFLINE | Sem efeito |
+| ENQ (0x05) | ⚠️ Causa OFFLINE | Sem efeito |
+| DLE (0x10) | ⚠️ Causa OFFLINE | Sem efeito |
+| EOT (0x04) | ⚠️ Causa OFFLINE | Sem efeito |
+| ESC (0x1B) x2 | ⚠️ Causa OFFLINE (precisa 2x) | Sem efeito |
+| Comandos ASCII | ⚠️ Causa OFFLINE | Sem efeito |
+
+**Conclusão**: O modo de emulação de impressora é muito simples - apenas responder ACK quando receber DLE. Qualquer outro comando causa desconexão.
 
 ---
 
@@ -26,13 +45,21 @@ Documentação da engenharia reversa do protocolo serial do aparelho D-PPG Elcat
 
 ---
 
-## 2. Mecanismos de Keep-Alive
+## 2. Dois Protocolos Distintos
 
-O Vasoquant suporta dois mecanismos de keep-alive, dependendo do modo de operação.
+O Vasoquant/Vasolab suporta **dois protocolos completamente diferentes**:
+
+### 2.1 Modo Impressora (DLE/ACK) - USADO PARA EXPORTAÇÃO
+
+Este é o modo que usamos para capturar exames. É extremamente simples.
+
+### 2.2 Modo VL320 (STX/ETX) - COMUNICAÇÃO AVANÇADA
+
+Protocolo mais avançado com pacotes binários, usado pelo software Vasoview para controle total do aparelho.
 
 ---
 
-### 2.1 Protocolo de Emulação de Impressora (DLE/ACK)
+## 3. Protocolo de Emulação de Impressora (DLE/ACK)
 
 **Modo**: Exportação de exames para "impressora serial"
 
@@ -47,6 +74,7 @@ Host → Vasoquant:  0x06 (ACK)
 
 - **Intervalo**: ~1 segundo quando idle
 - **Comportamento**: Se não receber ACK, aparelho mostra "printer offline"
+- **CRÍTICO**: ACK só pode ser enviado em resposta a DLE, nunca espontaneamente
 
 ---
 
