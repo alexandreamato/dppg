@@ -17,6 +17,16 @@ ENV/
 .DS_Store
 Thumbs.db
 
+# Binários do software original (grandes, para engenharia reversa local)
+app_original/
+app_original_v2/
+
+# Laudos médicos (dados sensíveis de pacientes)
+laudos/
+
+# Captura API Monitor
+*.apmx86
+
 # Dados de teste (CSVs podem ser grandes)
 # Descomente se não quiser versionar os CSVs:
 # ppg_data_*.csv
