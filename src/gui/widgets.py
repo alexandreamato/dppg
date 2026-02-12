@@ -9,6 +9,7 @@ import numpy as np
 from ..config import ESTIMATED_SAMPLING_RATE, ADC_TO_PPG_FACTOR, LABEL_DESCRIPTIONS
 from ..models import PPGBlock, PPGParameters
 from ..analysis import calculate_parameters, get_diagnostic_zone
+from ..diagnosis.classifier import classify_channel, classify_pump, VenousGrade
 
 
 class PPGCanvas(tk.Canvas):
@@ -240,48 +241,74 @@ class DiagnosticChart(tk.Canvas):
 
 
 class ParametersTable(ttk.Frame):
-    """Widget displaying PPG parameters in a table (To, Th, Ti, Vo, Fo x 4 channels)."""
+    """Widget displaying PPG parameters in a grid with per-cell red coloring for abnormal values."""
+
+    _COL_HEADERS = ["Parâmetro", "MIE", "MID", "MIE Tq", "MID Tq"]
+    _ROW_PARAMS = [
+        ("To", "To (s)"),
+        ("Th", "Th (s)"),
+        ("Ti", "Ti (s)"),
+        ("Vo", "Vo (%)"),
+        ("Fo", "Fo (%s)"),
+    ]
+    _COL_LABELS = [0xDF, 0xE1, 0xE0, 0xE2]  # MIE, MID, MIE Tq, MID Tq
 
     def __init__(self, parent, **kwargs):
         super().__init__(parent, **kwargs)
 
-        # Configure style for larger font
-        style = ttk.Style()
-        style.configure("Params.Treeview", font=("Helvetica", 11), rowheight=26)
-        style.configure("Params.Treeview.Heading", font=("Helvetica", 11, "bold"))
+        font_header = ("Helvetica", 11, "bold")
+        font_cell = ("Helvetica", 11)
 
-        columns = ("param", "mie", "mid", "mie_tq", "mid_tq")
-        self.tree = ttk.Treeview(self, columns=columns, show="headings", height=6,
-                                 style="Params.Treeview")
+        self._grid = tk.Frame(self, bg='white')
+        self._grid.pack(fill=tk.BOTH, expand=True)
 
-        self.tree.heading("param", text="Parâmetro")
-        self.tree.heading("mie", text="MIE")
-        self.tree.heading("mid", text="MID")
-        self.tree.heading("mie_tq", text="MIE Tq")
-        self.tree.heading("mid_tq", text="MID Tq")
+        # Header row
+        for col, text in enumerate(self._COL_HEADERS):
+            anchor = 'w' if col == 0 else 'center'
+            lbl = tk.Label(self._grid, text=text, font=font_header, bg='white',
+                           anchor=anchor, padx=8, pady=3)
+            lbl.grid(row=0, column=col, sticky='ew')
 
-        self.tree.column("param", width=160, anchor="w")
-        for col in ("mie", "mid", "mie_tq", "mid_tq"):
-            self.tree.column(col, width=75, anchor="center")
+        # Separator
+        sep = ttk.Separator(self._grid, orient='horizontal')
+        sep.grid(row=1, column=0, columnspan=5, sticky='ew', pady=1)
 
-        self.tree.pack(fill=tk.BOTH, expand=True)
+        # Data cells (store references for updating)
+        self._cells = {}  # (attr, col_idx) -> Label
+        for row_idx, (attr, label_text) in enumerate(self._ROW_PARAMS):
+            r = row_idx + 2  # offset for header + separator
+            param_lbl = tk.Label(self._grid, text=label_text, font=font_cell, bg='white',
+                                 anchor='w', padx=8, pady=2)
+            param_lbl.grid(row=r, column=0, sticky='ew')
+            for col_idx in range(4):
+                cell = tk.Label(self._grid, text="-", font=font_cell, bg='white',
+                                fg='gray', anchor='center', padx=8, pady=2)
+                cell.grid(row=r, column=col_idx + 1, sticky='ew')
+                self._cells[(attr, col_idx)] = cell
 
-        # Insert rows
-        self.tree.insert("", "end", iid="To", values=("To (s)", "-", "-", "-", "-"))
-        self.tree.insert("", "end", iid="Th", values=("Th (s)", "-", "-", "-", "-"))
-        self.tree.insert("", "end", iid="Ti", values=("Ti (s)", "-", "-", "-", "-"))
-        self.tree.insert("", "end", iid="Vo", values=("Vo (%)", "-", "-", "-", "-"))
-        self.tree.insert("", "end", iid="Fo", values=("Fo (%s)", "-", "-", "-", "-"))
+        # Column weights
+        self._grid.columnconfigure(0, weight=2)
+        for c in range(1, 5):
+            self._grid.columnconfigure(c, weight=1)
 
     def update_params(self, params_by_label: dict):
         """Update table from dict {label_byte: PPGParameters}."""
-        for attr in ["To", "Th", "Ti", "Vo", "Fo"]:
-            vals = [f"{attr} ({'s' if attr in ('To','Th','Ti') else '%' if attr == 'Vo' else '%s'})"]
-            for lb in [0xDF, 0xE1, 0xE0, 0xE2]:
+        for attr, _ in self._ROW_PARAMS:
+            for col_idx, lb in enumerate(self._COL_LABELS):
+                cell = self._cells[(attr, col_idx)]
                 p = params_by_label.get(lb)
                 if p:
                     v = getattr(p, attr, None)
-                    vals.append(str(int(v)) if attr == "Fo" and v is not None else str(v) if v is not None else "-")
+                    if v is not None:
+                        text = str(int(v)) if attr == "Fo" else str(v)
+                        # Red for abnormal To or Vo
+                        is_abnormal = False
+                        if attr == "To" and classify_channel(v) != VenousGrade.NORMAL:
+                            is_abnormal = True
+                        elif attr == "Vo" and classify_pump(v) != "normal":
+                            is_abnormal = True
+                        cell.config(text=text, fg='red' if is_abnormal else '#008099')
+                    else:
+                        cell.config(text="-", fg='gray')
                 else:
-                    vals.append("-")
-            self.tree.item(attr, values=tuple(vals))
+                    cell.config(text="-", fg='gray')

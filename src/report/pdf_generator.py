@@ -1,4 +1,4 @@
-"""PDF report generator reproducing the VASOSCREEN layout using reportlab."""
+"""PDF report generator using reportlab — single-page layout."""
 
 import io
 from datetime import date
@@ -24,6 +24,11 @@ from .templates import (
 )
 from .chart_renderer import render_ppg_chart, render_diagnostic_chart
 
+BIBLIOGRAPHY = (
+    "Amato ACM. Propedêutica vascular. São Paulo: Amato - Instituto de Medicina "
+    "Avançada; 2024. Capítulo 8, Propedêutica arterial armada; p. 106-167."
+)
+
 
 def generate_report_pdf(
     filepath: str,
@@ -41,53 +46,37 @@ def generate_report_pdf(
     report_title: str = "D-PPG",
     report_app_line: str = "D-PPG Digital Photoplethysmography",
 ):
-    """Generate a PDF report.
-
-    Args:
-        filepath: Output PDF path
-        patient_name: Full patient name
-        patient_dob: Date of birth string
-        patient_gender: M/F
-        patient_id: Patient ID/document number
-        exam_date: Date of the exam
-        blocks: dict mapping label_byte -> PPGBlock
-        complaints: Patient complaints text
-        diagnosis_text: Diagnostic text (auto-generated or edited)
-        clinic_name: Clinic name for header
-        doctor_name: Doctor name for signature
-        doctor_crm: Doctor CRM registration number
-        report_title: Main report title (replaces VASOSCREEN)
-        report_app_line: Application description line
-    """
+    """Generate a single-page PDF report."""
     c = Canvas(filepath, pagesize=A4)
     w, h = A4
     y = h - MARGIN_TOP
+    dpi = 150
 
     # ================================================================
-    # 1. HEADER (all texts configurable)
+    # 1. HEADER
     # ================================================================
     c.setFont("Helvetica-Bold", FONT_TITLE)
     c.setFillColorRGB(*COLOR_CYAN)
     c.drawString(MARGIN_LEFT, y, report_title)
-    y -= 16
+    y -= 14
 
     c.setFont("Helvetica", FONT_SMALL)
     c.setFillColorRGB(*COLOR_GRAY)
     if clinic_name:
         c.drawString(MARGIN_LEFT, y, clinic_name)
-        y -= 10
+        y -= 9
     if doctor_name:
         label = f"Examinador: {doctor_name}"
         if doctor_crm:
             label += f"  CRM {doctor_crm}"
         c.drawString(MARGIN_LEFT, y, label)
-        y -= 10
+        y -= 9
 
-    y -= 5
+    y -= 3
     c.setStrokeColorRGB(*COLOR_CYAN)
     c.setLineWidth(1)
     c.line(MARGIN_LEFT, y, w - MARGIN_RIGHT, y)
-    y -= 12
+    y -= 10
 
     # ================================================================
     # 2. PATIENT DATA
@@ -103,27 +92,25 @@ def generate_report_pdf(
         info_parts.append(f"Sexo: {'Masculino' if patient_gender == 'M' else 'Feminino'}")
     if patient_id:
         info_parts.append(f"ID: {patient_id}")
-
     if info_parts:
         c.setFont("Helvetica", FONT_BODY)
         c.drawRightString(w - MARGIN_RIGHT, y, "  |  ".join(info_parts))
-    y -= 18
+    y -= 14
 
     # ================================================================
-    # 3. APPLICATION LINE (configurable)
+    # 3. APPLICATION LINE
     # ================================================================
     c.setFont("Helvetica", FONT_BODY)
     c.setFillColorRGB(*COLOR_GRAY)
     c.drawString(MARGIN_LEFT, y, report_app_line)
     c.drawRightString(w - MARGIN_RIGHT, y, f"Data: {exam_date.strftime('%d/%m/%Y')}")
-    y -= 18
+    y -= 14
 
     # ================================================================
-    # 4. PPG CHARTS (2x2 grid) with point indicators
+    # 4. PPG CHARTS (2x2 grid) — reduced height for single page
     # ================================================================
     chart_w_pt = CONTENT_WIDTH / 2 - 5
-    chart_h_pt = 100
-    dpi = 150
+    chart_h_pt = 82
     chart_w_in = chart_w_pt / 72
     chart_h_in = chart_h_pt / 72
 
@@ -145,12 +132,12 @@ def generate_report_pdf(
             img = ImageReader(io.BytesIO(png_data))
             c.drawImage(img, x_pos, y - chart_h_pt, chart_w_pt, chart_h_pt)
 
-        y -= chart_h_pt + 8
+        y -= chart_h_pt + 5
 
-    y -= 5
+    y -= 3
 
     # ================================================================
-    # 5. PARAMETERS TABLE (with red for abnormal values)
+    # 5. PARAMETERS TABLE + DIAGNOSTIC CHART (side by side)
     # ================================================================
     params_by_label = {}
     for label_byte, block in blocks.items():
@@ -158,12 +145,13 @@ def generate_report_pdf(
         if p:
             params_by_label[label_byte] = p
 
-    y = _draw_params_table(c, y, params_by_label)
-    y -= 10
+    # --- Left: params table (narrower columns) ---
+    table_col_widths = [95, 55, 55, 55, 55]
+    table_w = sum(table_col_widths)
+    y_table_start = y
+    y_after_table = _draw_params_table(c, y, params_by_label, table_col_widths)
 
-    # ================================================================
-    # 6. DIAGNOSTIC CHART
-    # ================================================================
+    # --- Right: diagnostic chart ---
     diag_points = []
     labels_order = [(0xDF, "1-MIE"), (0xE1, "2-MID"), (0xE0, "3-MIE Tq"), (0xE2, "4-MID Tq")]
     for lb, lbl in labels_order:
@@ -171,91 +159,87 @@ def generate_report_pdf(
         if p:
             diag_points.append((p.To, p.Vo, lbl))
 
+    diag_gap = 15
+    diag_w_pt = CONTENT_WIDTH - table_w - diag_gap
+    diag_h_pt = 110
+    diag_w_in = diag_w_pt / 72
+    diag_h_in = diag_h_pt / 72
+
     if diag_points:
-        diag_w_in = 3.5
-        diag_h_in = 2.2
         diag_png = render_diagnostic_chart(diag_points, diag_w_in, diag_h_in, dpi)
-        diag_w_pt = diag_w_in * 72
-        diag_h_pt = diag_h_in * 72
-        x_center = MARGIN_LEFT + (CONTENT_WIDTH - diag_w_pt) / 2
-        c.drawImage(ImageReader(io.BytesIO(diag_png)), x_center, y - diag_h_pt,
-                     diag_w_pt, diag_h_pt)
-        y -= diag_h_pt + 8
+        diag_x = MARGIN_LEFT + table_w + diag_gap
+        c.drawImage(ImageReader(io.BytesIO(diag_png)), diag_x,
+                     y_table_start - diag_h_pt, diag_w_pt, diag_h_pt)
+
+    y = min(y_after_table, y_table_start - diag_h_pt) - 6
 
     # ================================================================
-    # 7. METHOD TEXT
+    # 6. METHOD TEXT + CLASSIFICATION TABLE (side by side)
     # ================================================================
-    c.setFont("Helvetica", FONT_SMALL)
+    # Left: method text (narrower)
+    method_w = CONTENT_WIDTH * 0.55
+    c.setFont("Helvetica-Oblique", 6.5)
     c.setFillColorRGB(*COLOR_GRAY)
+    wrapped_method = _wrap_text(METHOD_TEXT, method_w, "Helvetica-Oblique", 6.5, c)
     text_obj = c.beginText(MARGIN_LEFT, y)
-    text_obj.setFont("Helvetica", FONT_SMALL)
+    text_obj.setFont("Helvetica-Oblique", 6.5)
     text_obj.setFillColorRGB(*COLOR_GRAY)
-    wrapped_method = _wrap_text(METHOD_TEXT, CONTENT_WIDTH, "Helvetica", FONT_SMALL, c)
     for line in wrapped_method:
         text_obj.textLine(line)
     c.drawText(text_obj)
-    y -= (FONT_SMALL + 2) * len(wrapped_method) + 8
+    y_after_method = y - (6.5 + 1.5) * len(wrapped_method)
 
-    # ================================================================
-    # 8. CLASSIFICATION TABLE (with red for all abnormal grades)
-    # ================================================================
+    # Right: classification table
     channels_dict = {}
     for lb, p in params_by_label.items():
         channels_dict[lb] = {"To": p.To, "Th": p.Th, "Ti": p.Ti, "Vo": p.Vo, "Fo": p.Fo}
-
     class_rows = generate_classification_table(channels_dict)
     if class_rows:
-        y = _draw_classification_table(c, y, class_rows)
-        y -= 10
+        class_x = MARGIN_LEFT + CONTENT_WIDTH * 0.58
+        y_after_class = _draw_classification_table(c, y, class_rows,
+                                                    x_offset=class_x)
+    else:
+        y_after_class = y
 
-    # Check if we need a new page
-    if y < 200:
-        c.showPage()
-        y = h - MARGIN_TOP
+    y = min(y_after_method, y_after_class) - 6
 
     # ================================================================
-    # 9. COMPLAINTS
+    # 7. COMPLAINTS
     # ================================================================
     if complaints:
         c.setFont("Helvetica-Bold", FONT_BODY)
         c.setFillColorRGB(*COLOR_BLACK)
         c.drawString(MARGIN_LEFT, y, "Queixas:")
-        y -= 12
+        y -= 11
         c.setFont("Helvetica", FONT_BODY)
         for line in _wrap_text(complaints, CONTENT_WIDTH, "Helvetica", FONT_BODY, c):
-            if y < MARGIN_BOTTOM + 60:
-                c.showPage()
-                y = h - MARGIN_TOP
             c.drawString(MARGIN_LEFT, y, line)
-            y -= 11
-        y -= 5
+            y -= 10
+        y -= 3
 
     # ================================================================
-    # 10. DIAGNOSIS
+    # 8. DIAGNOSIS
     # ================================================================
     if diagnosis_text:
         c.setFont("Helvetica-Bold", FONT_BODY)
         c.setFillColorRGB(*COLOR_BLACK)
         c.drawString(MARGIN_LEFT, y, "Diagnóstico:")
-        y -= 12
+        y -= 11
         c.setFont("Helvetica", FONT_BODY)
         for para in diagnosis_text.split("\n\n"):
             for line in _wrap_text(para.strip(), CONTENT_WIDTH, "Helvetica", FONT_BODY, c):
-                if y < MARGIN_BOTTOM + 40:
-                    c.showPage()
-                    y = h - MARGIN_TOP
                 c.drawString(MARGIN_LEFT, y, line)
-                y -= 11
-            y -= 5
+                y -= 10
+            y -= 3
 
     # ================================================================
-    # 11. SIGNATURE
+    # 9. SIGNATURE
     # ================================================================
     if doctor_name:
-        sig_y = max(y - 40, MARGIN_BOTTOM + 20)
+        sig_y = max(y - 25, MARGIN_BOTTOM + 35)
         c.setStrokeColorRGB(*COLOR_BLACK)
         c.line(MARGIN_LEFT + 100, sig_y, MARGIN_LEFT + 350, sig_y)
-        sig_y -= 12
+        sig_y -= 10
         c.setFont("Helvetica", FONT_BODY)
         c.setFillColorRGB(*COLOR_BLACK)
         sig_text = doctor_name
@@ -263,14 +247,24 @@ def generate_report_pdf(
             sig_text += f" - CRM {doctor_crm}"
         c.drawCentredString(MARGIN_LEFT + 225, sig_y, sig_text)
 
+    # ================================================================
+    # 10. BIBLIOGRAPHY (footer)
+    # ================================================================
+    bib_y = MARGIN_BOTTOM + 10
+    c.setFont("Helvetica-Oblique", 6)
+    c.setFillColorRGB(*COLOR_GRAY)
+    c.drawString(MARGIN_LEFT, bib_y, f"Ref: {BIBLIOGRAPHY}")
+
     c.save()
 
 
-def _draw_params_table(c: Canvas, y: float, params: Dict[int, 'PPGParameters']) -> float:
+def _draw_params_table(c: Canvas, y: float, params: Dict,
+                       col_widths: List[int] = None) -> float:
     """Draw the parameters table with red coloring for abnormal values."""
     col_labels = ["Parâmetro", "MIE", "MID", "MIE Tq", "MID Tq"]
     col_bytes = [None, 0xDF, 0xE1, 0xE0, 0xE2]
-    col_widths = [150, 80, 80, 80, 80]
+    if col_widths is None:
+        col_widths = [150, 80, 80, 80, 80]
 
     rows = [
         ("To (s)", "To"),
@@ -285,22 +279,22 @@ def _draw_params_table(c: Canvas, y: float, params: Dict[int, 'PPGParameters']) 
     c.setFont("Helvetica-Bold", FONT_TABLE)
     c.setFillColorRGB(*COLOR_BLACK)
     for i, label in enumerate(col_labels):
-        c.drawString(x + 3, y, label)
+        c.drawString(x + 2, y, label)
         x += col_widths[i]
 
-    # Separator line below header (with proper spacing)
+    # Separator line
     y -= 4
     c.setStrokeColorRGB(*COLOR_GRAY)
     c.setLineWidth(0.5)
     c.line(MARGIN_LEFT, y, MARGIN_LEFT + sum(col_widths), y)
-    y -= 9
+    y -= 8
 
     # Data rows
     c.setFont("Helvetica", FONT_TABLE)
     for row_label, attr in rows:
         x = MARGIN_LEFT
         c.setFillColorRGB(*COLOR_BLACK)
-        c.drawString(x + 3, y, row_label)
+        c.drawString(x + 2, y, row_label)
         x += col_widths[0]
 
         for i in range(1, 5):
@@ -309,7 +303,6 @@ def _draw_params_table(c: Canvas, y: float, params: Dict[int, 'PPGParameters']) 
             val = getattr(p, attr, None) if p else None
             if val is not None:
                 text = str(int(val)) if attr == "Fo" else str(val)
-                # Red for abnormal To or Vo
                 is_abnormal = False
                 if attr == "To" and classify_channel(val) != VenousGrade.NORMAL:
                     is_abnormal = True
@@ -319,63 +312,63 @@ def _draw_params_table(c: Canvas, y: float, params: Dict[int, 'PPGParameters']) 
                     c.setFillColorRGB(*COLOR_RED)
                 else:
                     c.setFillColorRGB(*COLOR_CYAN)
-                c.drawString(x + 10, y, text)
+                c.drawString(x + 8, y, text)
             else:
                 c.setFillColorRGB(*COLOR_GRAY)
-                c.drawString(x + 10, y, "-")
+                c.drawString(x + 8, y, "-")
             x += col_widths[i]
 
-        y -= 11
+        y -= 10
 
     return y
 
 
-def _draw_classification_table(c: Canvas, y: float, rows: list) -> float:
+def _draw_classification_table(c: Canvas, y: float, rows: list,
+                                x_offset: float = None) -> float:
     """Draw the classification summary table with red for all abnormal results."""
-    c.setFont("Helvetica-Bold", FONT_TABLE)
+    x0 = x_offset if x_offset is not None else MARGIN_LEFT
+
+    c.setFont("Helvetica-Bold", 7.5)
     c.setFillColorRGB(*COLOR_BLACK)
 
-    headers = ["Membro", "Condição", "Classificação", "Bomba Muscular"]
-    col_widths = [80, 80, 150, 120]
-    x = MARGIN_LEFT
+    headers = ["Membro", "Cond.", "Classif.", "Bomba"]
+    col_widths = [40, 40, 65, 60]
+    x = x0
     for i, h in enumerate(headers):
-        c.drawString(x + 3, y, h)
+        c.drawString(x + 2, y, h)
         x += col_widths[i]
 
-    # Separator line below header (with proper spacing)
-    y -= 4
+    y -= 3
     c.setStrokeColorRGB(*COLOR_GRAY)
     c.setLineWidth(0.5)
-    c.line(MARGIN_LEFT, y, MARGIN_LEFT + sum(col_widths), y)
-    y -= 9
+    c.line(x0, y, x0 + sum(col_widths), y)
+    y -= 8
 
-    c.setFont("Helvetica", FONT_TABLE)
+    c.setFont("Helvetica", 7.5)
     for row in rows:
-        x = MARGIN_LEFT
+        x = x0
         c.setFillColorRGB(*COLOR_BLACK)
-        c.drawString(x + 3, y, row["limb"])
+        c.drawString(x + 2, y, row["limb"])
         x += col_widths[0]
-        c.drawString(x + 3, y, row["tourniquet"])
+        c.drawString(x + 2, y, row["tourniquet"])
         x += col_widths[1]
 
-        # Color-code grade: green for Normal, red for ALL abnormal grades
         grade = row["grade"]
         if grade == "Normal":
             c.setFillColorRGB(0, 0.5, 0)
         else:
             c.setFillColorRGB(*COLOR_RED)
-        c.drawString(x + 3, y, grade)
+        c.drawString(x + 2, y, grade)
         x += col_widths[2]
 
-        # Color-code pump: green for Adequada, red for Patológica
         pump = row["pump"]
         if pump == "Adequada":
             c.setFillColorRGB(0, 0.5, 0)
         else:
             c.setFillColorRGB(*COLOR_RED)
-        c.drawString(x + 3, y, pump)
+        c.drawString(x + 2, y, pump)
 
-        y -= 11
+        y -= 10
 
     return y
 

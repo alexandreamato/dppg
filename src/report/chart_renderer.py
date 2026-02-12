@@ -51,18 +51,18 @@ def render_ppg_chart(block: PPGBlock, width_inches=3.0, height_inches=1.8, dpi=1
     y_max = max(8, np.max(ppg) + 0.5)
     ax.set_ylim(y_min, y_max)
 
-    # Markers
+    # Markers (distinct colors from the red curve)
     if params:
-        # Peak marker (X)
+        # Peak marker (X) - blue
         peak_t = 0
         peak_ppg = ppg[params.peak_index]
-        ax.plot(peak_t, peak_ppg, 'rx', markersize=8, markeredgewidth=2)
+        ax.plot(peak_t, peak_ppg, 'x', color='#0000CC', markersize=8, markeredgewidth=2)
 
-        # Endpoint marker (X)
+        # Endpoint marker (X) - green
         end_idx = min(params.To_end_index, len(samples) - 1)
         end_t = (end_idx - peak_idx) / sr
         end_ppg = ppg[end_idx]
-        ax.plot(end_t, end_ppg, 'rx', markersize=8, markeredgewidth=2)
+        ax.plot(end_t, end_ppg, 'x', color='#008800', markersize=8, markeredgewidth=2)
 
     # Label
     label_desc = block.label_desc
