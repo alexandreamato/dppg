@@ -1607,27 +1607,26 @@ class DPPGReader:
         self.root.after(0, lambda d=data: self.debug_update_last_rx(d))
 
         # Auto-resposta: manter impressora "online"
-        # DLE isolado (0x10) = polling → handshake completo (ACK+ESC+I = 3 bytes)
+        # DLE isolado (0x10) = polling do dispositivo
+        # Modo impressora: responder ACK simples (1 byte) - mantém "printer online"
+        # Modo comando: responder ACK+ESC+I (3 bytes) - entra em modo de comando
+        #   (requer keep-alive ENQ a cada <4s, senão desconecta)
         # Blocos de dados → ACK simples (1 byte)
-        # A menos que o modo de debug tenha pausado o auto-ACK
         if self.socket and not self.auto_ack_paused:
             is_dle_polling = (len(data) == 1 and data[0] == self.DLE)
             try:
                 if is_dle_polling:
-                    # DLE isolado: enviar handshake completo (como o Vasoview faz)
-                    self.socket.send(self.CMD_HANDSHAKE)
-                    self.awaiting_id_response = True
-                    self.id_buffer.clear()
-                    tx_bytes = self.CMD_HANDSHAKE
-                    self.root.after(0, lambda: self.log("TX: ACK+ESC+I (handshake)", "sent"))
+                    # DLE isolado: responder ACK simples para manter "printer online"
+                    # (ACK+ESC+I entraria em modo de comando, que requer keep-alive)
+                    self.socket.send(self.CMD_ACK)
+                    tx_bytes = self.CMD_ACK
+                    if not self.printer_online:
+                        self.printer_online = True
+                        self.root.after(0, lambda: self.status_label.config(
+                            text="Printer Online - Aguardando dados", foreground="green"))
+                        self.root.after(0, lambda: self.log("TX: ACK → printer online", "sent"))
+                    # Não logar cada DLE/ACK para evitar spam no log
                 else:
-                    # Checar se estamos esperando resposta de ID (13 bytes após handshake)
-                    if self.awaiting_id_response:
-                        self.id_buffer.extend(data)
-                        if len(self.id_buffer) >= 13:
-                            self._parse_id_response(bytes(self.id_buffer[:13]))
-                            self.awaiting_id_response = False
-                            self.id_buffer.clear()
                     # Bloco de dados: enviar ACK simples
                     self.socket.send(self.CMD_ACK)
                     tx_bytes = self.CMD_ACK
@@ -1688,17 +1687,24 @@ class DPPGReader:
                 if data_end > len(self.data_buffer):
                     break  # Buffer incompleto, aguardar mais dados
 
-                # Verificar se há metadados suficientes (pelo menos 10 bytes para o padrão)
-                # OU se há um novo bloco começando (ESC após os dados)
-                metadata_min_size = 10  # 1D XX XX 00 00 00 1D YY YY + margem
-                has_next_block = False
-                for i in range(data_end, min(data_end + 30, len(self.data_buffer))):
-                    if self.data_buffer[i] == self.ESC:
-                        has_next_block = True
+                # Verificar se temos metadados completos
+                # Formato: 19 bytes (GS+baseline + separator + GS+exam + payload + EOT)
+                # Delimitador seguro: próximo bloco (ESC + 'L' = 0x1B 0x4C)
+                # NÃO usar EOT (0x04) como delimitador porque pode aparecer em bytes do payload
+                metadata_full_size = 19
+                next_block_pos = None
+
+                # Procurar próximo bloco real (ESC + 'L')
+                for i in range(data_end, min(data_end + 50, len(self.data_buffer)) - 1):
+                    if (self.data_buffer[i] == self.ESC and
+                        self.data_buffer[i + 1] == 0x4C):
+                        next_block_pos = i
                         break
 
-                if not has_next_block and (data_end + metadata_min_size) > len(self.data_buffer):
-                    break  # Aguardar mais dados para os metadados
+                # Aguardar mais dados se não temos próximo bloco e buffer é pequeno
+                if next_block_pos is None:
+                    if (data_end + metadata_full_size) > len(self.data_buffer):
+                        break  # Buffer incompleto, aguardar mais dados
 
                 # Extrair amostras
                 samples = []
@@ -1709,9 +1715,12 @@ class DPPGReader:
                         value = low | (high << 8)
                         samples.append(value)
 
-                # Capturar metadados brutos para análise
+                # Capturar metadados brutos - limitar ao próximo bloco real
                 metadata_start = data_end
-                metadata_end = min(metadata_start + 40, len(self.data_buffer))
+                if next_block_pos is not None:
+                    metadata_end = next_block_pos
+                else:
+                    metadata_end = min(metadata_start + 40, len(self.data_buffer))
                 metadata_raw = bytes(self.data_buffer[metadata_start:metadata_end])
 
                 # ============================================================
@@ -1764,23 +1773,31 @@ class DPPGReader:
                 if hw_baseline is not None:
                     block.hw_baseline = hw_baseline
 
-                if payload_start is not None and payload_start + 10 <= len(metadata_raw):
+                if payload_start is not None:
                     payload = metadata_raw[payload_start:]
                     sr = int(ESTIMATED_SAMPLING_RATE)
+                    plen = len(payload)
 
-                    block.hw_To_samples = payload[0]
-                    block.hw_Th_samples = payload[1]
-                    block.hw_amplitude = payload[2] | (payload[3] << 8)
-                    block.hw_Fo_x100 = payload[4] | (payload[5] << 8)
+                    # Extrair progressivamente conforme bytes disponíveis
+                    # Mínimo útil: 8 bytes (To, Th, amplitude, Fo, peak, Ti)
+                    if plen >= 2:
+                        block.hw_To_samples = payload[0]
+                        block.hw_Th_samples = payload[1]
+                    if plen >= 4:
+                        block.hw_amplitude = payload[2] | (payload[3] << 8)
+                    if plen >= 6:
+                        block.hw_Fo_x100 = payload[4] | (payload[5] << 8)
+                    if plen >= 7:
+                        peak_raw = payload[6]
+                        block.hw_peak_index = peak_raw + 2 * sr - 1  # peak_raw + 7
+                    if plen >= 8:
+                        block.hw_Ti = payload[7]
+                    if plen >= 9:
+                        block.hw_flags = payload[8]
 
-                    peak_raw = payload[6]
-                    block.hw_peak_index = peak_raw + 2 * sr - 1  # peak_raw + 7
-
-                    block.hw_Ti = payload[7]
-                    block.hw_flags = payload[8]
-
-                    # Calcular end_index
-                    block.hw_end_index = block.hw_peak_index + block.hw_To_samples
+                    # Calcular end_index se temos peak e To
+                    if block.hw_peak_index is not None and block.hw_To_samples is not None:
+                        block.hw_end_index = block.hw_peak_index + block.hw_To_samples
                 self.ppg_blocks.append(block)
 
                 # Se encontrou exam_number, aplicar retroativamente a blocos sem número
@@ -1805,11 +1822,17 @@ class DPPGReader:
                 self.log(f"Bloco: L{block.label_char} {block.label_desc} | {len(block.samples)} amostras{' | #'+str(exam_number) if exam_number else ''}{trim_str}", "block")
 
                 # Remover dados processados do buffer
-                # Procurar próximo ESC ou fim do bloco
+                # Procurar próximo bloco real (ESC + 'L') para não confundir
+                # bytes 0x1B nos metadados com início de bloco
                 next_start = data_end
-                # Pular metadados até próximo ESC ou fim
-                while next_start < len(self.data_buffer) and self.data_buffer[next_start] != self.ESC:
+                while next_start < len(self.data_buffer) - 1:
+                    if (self.data_buffer[next_start] == self.ESC and
+                        self.data_buffer[next_start + 1] == 0x4C):
+                        break
                     next_start += 1
+                else:
+                    # Não encontrou próximo bloco, consumir tudo
+                    next_start = len(self.data_buffer)
 
                 self.data_buffer = self.data_buffer[next_start:]
 
