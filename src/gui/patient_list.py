@@ -125,7 +125,7 @@ class PatientListView(ttk.Frame):
 
     def _on_capture(self):
         if self.on_capture:
-            self.on_capture()
+            self.on_capture(self._get_selected_patient())
 
     def _on_settings(self):
         if self.on_settings:

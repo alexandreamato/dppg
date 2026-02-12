@@ -66,11 +66,13 @@ class DPPGManagerApp:
                                 "Use 'Capturar' para adquirir dados.",
                                 parent=self.root)
 
-    def _show_capture(self):
+    def _show_capture(self, patient: Patient = None):
         self._clear_container()
         view = CaptureView(self.container, self.db)
         view.on_back = self._show_patient_list
         view.on_exam_saved = self._show_patient_list
+        if patient:
+            view.select_patient(patient)
         view.pack(fill=tk.BOTH, expand=True)
         self._current_view = view
 

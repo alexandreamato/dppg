@@ -169,6 +169,12 @@ class CaptureView(ttk.Frame):
             self._patients_map[display] = p.id
         self.patient_combo['values'] = values
 
+    def select_patient(self, patient):
+        """Pre-select a patient in the combo box."""
+        display = f"{patient.full_name} (ID: {patient.id})"
+        if display in self._patients_map:
+            self.patient_var.set(display)
+
     def _new_patient(self):
         from .patient_form import PatientFormDialog
         def on_save(patient):
