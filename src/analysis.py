@@ -4,18 +4,29 @@ Análise e cálculo de parâmetros do sinal D-PPG.
 Este módulo implementa os algoritmos de processamento de sinal
 para extrair os parâmetros quantitativos da curva PPG.
 
-MÉTODO: Detecção direta de cruzamento (crossing detection)
-Baseado na engenharia reversa do Vasoview original, que NÃO usa
-fitting exponencial, mas detecta diretamente quando o sinal
-cruza os níveis de 50%, 90% e 100% de recuperação.
+MÉTODO: Baseado no pseudocódigo de dppg 2.dll (fcn.100182c0).
+Algoritmos confirmados via engenharia reversa com radare2:
 
-Referência: Vasoview_Analise_Tecnica_Detalhada.docx
+- To: Tempo entre pico e endpoint de recuperação (threshold ~97%)
+      No original: To = (end_marker - peak) / sr (markers do hardware)
+      Na nossa implementação: endpoint via threshold crossing a 3%
+- Th: Tempo até 50% de recuperação (threshold crossing)
+      Confirmado: shift-right por 1 (divisão por 2) em 0x100183AF
+- Ti: Extrapolação linear adaptativa do slope inicial de recuperação
+      NÃO usa threshold crossing. Usa janela de 3s ou 6s.
+- Vo: Amplitude relativa ao baseline: (peak - baseline) / baseline × 100
+- Fo: Integral (área sob curva) de peak a endpoint, normalizada
+      NÃO é Vo × Th. É integral real com correção trapezoidal.
+
+NOTA: A constante 0.125 encontrada em 0x10039d68 da DLL era usada para
+layout de impressão, NÃO para cálculo de Ti. O Ti usa extrapolação
+linear adaptativa, não cruzamento de threshold.
 """
 
 from typing import Optional, List, Tuple
 import numpy as np
 
-from .config import ESTIMATED_SAMPLING_RATE
+from .config import ESTIMATED_SAMPLING_RATE, AnalysisParams
 from .models import PPGParameters, PPGBlock
 
 
@@ -23,22 +34,11 @@ def calculate_parameters(block: PPGBlock) -> Optional[PPGParameters]:
     """
     Calcula os parâmetros quantitativos da curva D-PPG.
 
-    Usa DETECÇÃO DIRETA DE CRUZAMENTO para encontrar To, Th, Ti.
-    Este é o método usado pelo software original Vasoview.
-
-    IMPORTANTE: Em casos com torniquete, o sinal pode não retornar ao baseline
-    original. Neste caso, usamos o valor estável final (asymptotic baseline)
-    como referência para os tempos de recuperação.
-
-    Parâmetros calculados:
-        - To: Tempo até 100% de recuperação (retorno ao baseline estável)
-        - Th: Tempo até 50% de recuperação
-        - Ti: Tempo até 90% de recuperação (fase inicial de influxo)
-        - Vo: Amplitude máxima em % do baseline INICIAL
-        - Fo: Área sob a curva de recuperação (integral)
+    Usa valores do hardware (baseline, peak, endpoint) quando disponíveis
+    nos metadados do protocolo. Caso contrário, calcula por software.
 
     Args:
-        block: Bloco PPG com as amostras
+        block: Bloco PPG com as amostras (e opcionalmente hw_* metadata)
 
     Returns:
         PPGParameters com os valores calculados, ou None se inválido
@@ -48,54 +48,83 @@ def calculate_parameters(block: PPGBlock) -> Optional[PPGParameters]:
     if len(samples) < 40:
         return None
 
-    # ================================================================
-    # 1. DETECÇÃO DOS BASELINES
-    # ================================================================
-    # Baseline inicial: antes do exercício (para cálculo de Vo)
-    initial_baseline = np.median(samples[:10])
-
-    # Baseline estável: valor final de estabilização (para tempos)
-    # Em casos com torniquete, pode ser diferente do inicial
-    stable_baseline = np.median(samples[-20:])
+    sr = ESTIMATED_SAMPLING_RATE
+    has_hw = (
+        getattr(block, 'hw_baseline', None) is not None and
+        getattr(block, 'hw_peak_index', None) is not None and
+        getattr(block, 'hw_amplitude', None) is not None
+    )
 
     # ================================================================
-    # 2. DETECÇÃO DO PICO (máximo esvaziamento venoso)
+    # 1. BASELINE
     # ================================================================
-    window = 5
-    if len(samples) > window:
-        smoothed = np.convolve(samples, np.ones(window)/window, mode='valid')
-        offset = (window - 1) // 2
+    if has_hw:
+        initial_baseline = float(block.hw_baseline)
     else:
-        smoothed = samples
-        offset = 0
+        initial_baseline = float(np.median(samples[:10]))
 
-    search_start = max(10, int(len(smoothed) * 0.1))
-    search_end = int(len(smoothed) * 0.9)
-
-    if search_start >= search_end:
-        return None
-
-    # O sinal SOBE durante exercício (polaridade invertida)
-    peak_idx_smooth = np.argmax(smoothed[search_start:search_end]) + search_start
-    peak_idx = peak_idx_smooth + offset
-    peak_value = samples[peak_idx]
+    stable_baseline = float(np.median(samples[-20:]))
 
     # ================================================================
-    # 3. CÁLCULO DE Vo (Venous Pump Power)
+    # 2. PICO
     # ================================================================
-    # Vo usa o baseline INICIAL (estado antes do exercício)
-    # Fórmula: Vo = (Vpeak - Vbaseline) / Vbaseline × 100
-    amplitude_vo = peak_value - initial_baseline
+    if has_hw and block.hw_peak_index < len(samples):
+        peak_idx = block.hw_peak_index
+        peak_value = float(samples[peak_idx])
+    else:
+        # Fallback: detecção por software
+        window = AnalysisParams.SMOOTHING_WINDOW
+
+        global_max = float(np.max(samples))
+        estimated_amplitude = global_max - initial_baseline
+        estimated_vo = (estimated_amplitude / initial_baseline) * 100.0 if initial_baseline > 0 else 0
+
+        exercise_start = 5
+        exercise_end = min(int(25 * sr), len(samples) - 10)
+
+        if exercise_end <= exercise_start:
+            return None
+
+        if estimated_vo < AnalysisParams.LOW_AMPLITUDE_VO_THRESHOLD:
+            peak_idx = int(exercise_start + np.argmax(samples[exercise_start:exercise_end]))
+        else:
+            if len(samples) > window:
+                smoothed = np.convolve(samples, np.ones(window)/window, mode='valid')
+                offset = (window - 1) // 2
+            else:
+                smoothed = samples
+                offset = 0
+
+            search_start = max(10, int(len(smoothed) * 0.1))
+            search_end = int(len(smoothed) * 0.9)
+
+            if search_start >= search_end:
+                return None
+
+            peak_idx_smooth = np.argmax(smoothed[search_start:search_end]) + search_start
+            peak_idx = peak_idx_smooth + offset
+
+        peak_idx = min(peak_idx, len(samples) - 1)
+        peak_value = float(samples[peak_idx])
+
+    # ================================================================
+    # 3. Vo (Venous Pump Power)
+    # ================================================================
+    if has_hw and block.hw_amplitude > 0:
+        amplitude_vo = float(block.hw_amplitude)
+    else:
+        amplitude_vo = peak_value - initial_baseline
+
     if amplitude_vo <= 0 or initial_baseline <= 0:
         return None
 
     Vo = (amplitude_vo / initial_baseline) * 100.0
 
-    if Vo < 0.5:  # Amplitude muito baixa
+    if Vo < 0.5:
         return None
 
     # ================================================================
-    # 4. DETECÇÃO DOS TEMPOS POR CRUZAMENTO DE NÍVEIS
+    # 4. TEMPOS
     # ================================================================
     recovery_start = peak_idx
     recovery_samples = samples[recovery_start:]
@@ -103,50 +132,48 @@ def calculate_parameters(block: PPGBlock) -> Optional[PPGParameters]:
     if len(recovery_samples) < 10:
         return None
 
-    # Amplitude de recuperação: do pico até o baseline de REFERÊNCIA
-    # Para casos "s/ Tq" (sem torniquete), o sinal pode retornar ao baseline inicial
-    # ou até ultrapassá-lo. Usamos o MAIOR dos dois baselines como referência.
-    reference_baseline = max(stable_baseline, initial_baseline)
-    amplitude_ref = peak_value - reference_baseline
+    sample_time = 1.0 / sr
 
-    if amplitude_ref <= 0:
-        # Se não há recuperação significativa, usar baseline inicial
-        amplitude_ref = amplitude_vo
-        reference_baseline = initial_baseline
+    # ----------------------------------------------------------------
+    # 4a. Th
+    # ----------------------------------------------------------------
+    if has_hw and block.hw_Th_samples is not None and block.hw_Th_samples > 0:
+        Th = block.hw_Th_samples * sample_time
+    else:
+        level_Th = initial_baseline + amplitude_vo * AnalysisParams.THRESHOLD_TH
+        Th_samples_val = _find_crossing(recovery_samples, level_Th, direction='down')
+        if Th_samples_val is None:
+            Th_samples_val = float(len(recovery_samples) - 1)
+        Th = Th_samples_val * sample_time
 
-    # ================================================================
-    # NÍVEIS DE CRUZAMENTO (calibrado com laudos originais)
-    # ================================================================
-    # Th: 50% de recuperação relativo ao baseline INICIAL
-    # (Half-amplitude time mede metade da amplitude total)
-    level_Th = initial_baseline + amplitude_vo * 0.50
+    # ----------------------------------------------------------------
+    # 4b. Ti
+    # ----------------------------------------------------------------
+    if has_hw and block.hw_Ti is not None and block.hw_Ti > 0:
+        Ti = float(block.hw_Ti)
+    else:
+        Ti = _calculate_ti(samples, peak_idx, peak_value, initial_baseline, sr)
 
-    # Ti: 90% de recuperação relativo ao baseline de REFERÊNCIA
-    # (Initial inflow mede até próximo do ponto de estabilização)
-    level_Ti = reference_baseline + amplitude_ref * 0.10
+    # ----------------------------------------------------------------
+    # 4c. To
+    # ----------------------------------------------------------------
+    hw_flags = getattr(block, 'hw_flags', None)
+    if has_hw and block.hw_To_samples is not None and block.hw_To_samples > 0:
+        To_samples_val = block.hw_To_samples
+        To = To_samples_val * sample_time
+    else:
+        reference_baseline = max(stable_baseline, initial_baseline)
+        amplitude_ref = peak_value - reference_baseline
 
-    # To: ~97% de recuperação relativo ao baseline de REFERÊNCIA
-    # (Não usa 100% porque o sinal pode não retornar completamente)
-    level_To = reference_baseline + amplitude_ref * 0.03
+        if amplitude_ref <= 0:
+            amplitude_ref = amplitude_vo
+            reference_baseline = initial_baseline
 
-    # Encontrar cruzamentos
-    Th_samples = _find_crossing(recovery_samples, level_Th, direction='down')
-    Ti_samples = _find_crossing(recovery_samples, level_Ti, direction='down')
-    To_samples = _find_crossing(recovery_samples, level_To, direction='down')
-
-    sample_time = 1.0 / ESTIMATED_SAMPLING_RATE
-
-    # Extrapolar se necessário (raro com baseline estável)
-    if Th_samples is None:
-        Th_samples = _extrapolate_crossing(recovery_samples, level_Th)
-    if Ti_samples is None:
-        Ti_samples = _extrapolate_crossing(recovery_samples, level_Ti)
-    if To_samples is None:
-        To_samples = _extrapolate_crossing(recovery_samples, level_To)
-
-    Th = Th_samples * sample_time if Th_samples else None
-    Ti = Ti_samples * sample_time if Ti_samples else None
-    To = To_samples * sample_time if To_samples else None
+        level_To = reference_baseline + amplitude_ref * AnalysisParams.THRESHOLD_TO
+        To_samples_val = _find_crossing(recovery_samples, level_To, direction='down')
+        if To_samples_val is None:
+            To_samples_val = _extrapolate_crossing(recovery_samples, level_To)
+        To = To_samples_val * sample_time if To_samples_val else None
 
     # Validar resultados
     if Th is None or Ti is None or To is None:
@@ -155,18 +182,29 @@ def calculate_parameters(block: PPGBlock) -> Optional[PPGParameters]:
         return None
 
     # ================================================================
-    # 5. CÁLCULO DE Fo (Venous Refill Surface)
+    # 5. Fo (Integral da curva de recuperação)
     # ================================================================
-    # Calibrado com laudos originais: Fo ≈ Vo × Th
-    # Esta relação vem da física do decaimento exponencial onde
-    # a integral é proporcional à amplitude × constante de tempo
-    Fo = Vo * Th
+    if has_hw and block.hw_Fo_x100 is not None and block.hw_Fo_x100 > 0:
+        Fo = block.hw_Fo_x100 / 100.0
+    else:
+        if has_hw and block.hw_To_samples is not None:
+            fo_end_idx = recovery_start + block.hw_To_samples
+        elif To_samples_val is not None:
+            fo_end_idx = recovery_start + int(To_samples_val)
+        else:
+            fo_end_idx = len(samples) - 1
+        fo_end_idx = min(fo_end_idx, len(samples) - 1)
+        Fo = _calculate_fo(samples, recovery_start, fo_end_idx, initial_baseline, sr)
 
     # ================================================================
     # 6. ÍNDICES PARA VISUALIZAÇÃO
     # ================================================================
-    To_end_index = recovery_start + (int(To_samples) if To_samples else len(recovery_samples) - 1)
-    To_end_index = min(To_end_index, len(samples) - 1)
+    if has_hw and block.hw_end_index is not None:
+        To_end_index = min(block.hw_end_index, len(samples) - 1)
+    elif To_samples_val is not None:
+        To_end_index = min(recovery_start + int(To_samples_val), len(samples) - 1)
+    else:
+        To_end_index = len(samples) - 1
 
     exercise_threshold = initial_baseline + amplitude_vo * 0.10
     exercise_start_index = 0
@@ -178,7 +216,7 @@ def calculate_parameters(block: PPGBlock) -> Optional[PPGParameters]:
     return PPGParameters(
         To=round(To, 1),
         Th=round(Th, 1),
-        Ti=round(Ti, 1),
+        Ti=round(Ti, 0),
         Vo=round(Vo, 1),
         Fo=round(Fo, 0),
         peak_index=peak_idx,
@@ -187,6 +225,128 @@ def calculate_parameters(block: PPGBlock) -> Optional[PPGParameters]:
         baseline_value=initial_baseline,
         peak_value=peak_value,
     )
+
+
+def _calculate_ti(
+    samples: np.ndarray,
+    peak_idx: int,
+    peak_value: float,
+    baseline: float,
+    sr: float
+) -> Optional[float]:
+    """
+    Calcula Ti usando extrapolação linear adaptativa.
+
+    Algoritmo confirmado via pseudocódigo de dppg 2.dll (0x10018460-0x10018520):
+    1. Verifica queda do sinal nos primeiros 3 segundos após o pico
+    2. Se queda >= 10 unidades ADC: usa janela de 3s (decaimento rápido)
+    3. Se queda < 10: usa janela de 6s (decaimento lento)
+    4. Extrapola: Ti = janela × amplitude / queda_na_janela
+
+    Args:
+        samples: Array completo de amostras
+        peak_idx: Índice do pico
+        peak_value: Valor do pico (ADC)
+        baseline: Valor do baseline (ADC)
+        sr: Taxa de amostragem (Hz)
+
+    Returns:
+        Ti em segundos, ou None se não for possível calcular
+    """
+    amplitude = peak_value - baseline
+    if amplitude <= 0:
+        return None
+
+    # Verificar queda nos primeiros 3 segundos
+    offset_3sec = peak_idx + int(AnalysisParams.TI_FAST_WINDOW * sr)
+
+    if offset_3sec >= len(samples):
+        # Não há dados suficientes para calcular Ti
+        return None
+
+    delta_3sec = peak_value - samples[offset_3sec]
+
+    # Escolher janela adaptativa
+    if delta_3sec >= AnalysisParams.TI_DELTA_THRESHOLD:
+        window_periods = AnalysisParams.TI_FAST_WINDOW  # 3 segundos
+    else:
+        window_periods = AnalysisParams.TI_SLOW_WINDOW  # 6 segundos
+
+    # Índice do alvo na janela escolhida
+    target_idx = peak_idx + int(window_periods * sr)
+    if target_idx >= len(samples):
+        # Usar último sample disponível se não houver dados suficientes
+        target_idx = len(samples) - 1
+        # Ajustar janela efetiva
+        window_periods = (target_idx - peak_idx) / sr
+
+    target_value = samples[target_idx]
+    denominator = peak_value - target_value
+
+    if denominator <= 0:
+        # Sinal não está recuperando: overflow
+        return AnalysisParams.TI_MAX_SECONDS
+
+    # Extrapolação linear: Ti = janela × amplitude / queda
+    Ti = window_periods * amplitude / denominator
+
+    # Cap em 120 segundos (como o Vasoview faz)
+    if Ti > AnalysisParams.TI_MAX_SECONDS:
+        Ti = AnalysisParams.TI_MAX_SECONDS
+
+    return float(Ti)
+
+
+def _calculate_fo(
+    samples: np.ndarray,
+    peak_idx: int,
+    end_idx: int,
+    baseline: float,
+    sr: float
+) -> float:
+    """
+    Calcula Fo usando integração real (área sob a curva de recuperação).
+
+    Algoritmo confirmado via pseudocódigo de dppg 2.dll (0x10018520-0x100186EB):
+    1. Soma (sample[i] - baseline) de peak a end
+    2. Aplica correção trapezoidal para excesso residual
+    3. Normaliza: × 100 / baseline / sr → resultado em %×s
+
+    Args:
+        samples: Array completo de amostras
+        peak_idx: Índice do pico (início da integração)
+        end_idx: Índice do endpoint (fim da integração)
+        baseline: Valor do baseline (ADC)
+        sr: Taxa de amostragem (Hz)
+
+    Returns:
+        Fo em %×s (percent × seconds)
+    """
+    if end_idx <= peak_idx or baseline <= 0:
+        return 0.0
+
+    # Garantir limites válidos
+    end_idx = min(end_idx, len(samples) - 1)
+
+    # Soma de (sample - baseline) de peak a end
+    segment = samples[peak_idx:end_idx]
+    area = float(np.sum(segment - baseline))
+
+    # Correção trapezoidal: subtrai metade do retângulo residual
+    # Isso compensa o fato de que o sinal pode não ter retornado
+    # completamente ao baseline no endpoint
+    last_excess = float(samples[end_idx] - baseline)
+    n_samples = end_idx - peak_idx
+    correction = last_excess * n_samples / 2.0
+
+    adjusted = area - correction
+
+    # Normalizar para %×s
+    # area está em ADC×amostras, baseline em ADC, sr em Hz
+    # Fo = area / baseline × 100 / sr = %×s
+    Fo = adjusted * 100.0 / (baseline * sr)
+
+    return max(Fo, 0.0)
 
 
 def _find_crossing(
@@ -207,13 +367,10 @@ def _find_crossing(
     """
     for i in range(len(samples) - 1):
         if direction == 'down':
-            # Procurar cruzamento descendente
             if samples[i] >= level and samples[i + 1] < level:
-                # Interpolação linear para posição exata
                 frac = (samples[i] - level) / (samples[i] - samples[i + 1])
                 return i + frac
         else:
-            # Procurar cruzamento ascendente
             if samples[i] <= level and samples[i + 1] > level:
                 frac = (level - samples[i]) / (samples[i + 1] - samples[i])
                 return i + frac
@@ -228,41 +385,42 @@ def _extrapolate_crossing(
     """
     Extrapola linearmente para encontrar quando o sinal cruzaria um nível.
 
-    Usa os últimos pontos para estimar a tendência e extrapolar.
+    Usado apenas para To quando o sinal não atinge o threshold de recuperação
+    dentro da gravação.
 
     Args:
         samples: Array de amostras
         level: Nível alvo
 
     Returns:
-        Índice extrapolado, ou None se não for possível
+        Índice extrapolado (em amostras), ou None se não for possível
     """
     if len(samples) < 10:
         return None
 
-    # Usar últimos 20% dos dados para estimar tendência
-    n_fit = max(10, len(samples) // 5)
-    fit_samples = samples[-n_fit:]
-    fit_indices = np.arange(len(samples) - n_fit, len(samples))
+    n_fit = min(AnalysisParams.EXTRAPOLATION_FIT_SAMPLES, len(samples) // 2)
+    n_fit = max(n_fit, 5)
 
-    # Regressão linear
-    try:
-        slope, intercept = np.polyfit(fit_indices, fit_samples, 1)
-    except np.linalg.LinAlgError:
-        return None
+    last_samples = samples[-n_fit:]
+    last_value = float(samples[-1])
 
-    if abs(slope) < 1e-6:
-        return None  # Sinal praticamente constante
+    slope = (last_samples[-1] - last_samples[0]) / (n_fit - 1)
 
-    # Encontrar onde a linha cruza o nível
-    # level = slope * x + intercept
-    # x = (level - intercept) / slope
-    crossing_idx = (level - intercept) / slope
+    if slope >= 0:
+        max_samples = AnalysisParams.MAX_EXTRAPOLATION_TIME * ESTIMATED_SAMPLING_RATE
+        return max_samples
 
-    # Limitar extrapolação a no máximo 2x o tamanho dos dados
-    max_extrapolation = len(samples) * 2
-    if crossing_idx < 0 or crossing_idx > max_extrapolation:
-        return None
+    remaining = last_value - level
+
+    if remaining <= 0:
+        return float(len(samples) - 1)
+
+    additional_samples = remaining / abs(slope)
+    crossing_idx = len(samples) - 1 + additional_samples
+
+    max_samples = AnalysisParams.MAX_EXTRAPOLATION_TIME * ESTIMATED_SAMPLING_RATE
+    if crossing_idx > max_samples:
+        crossing_idx = max_samples
 
     return crossing_idx
 
@@ -282,15 +440,12 @@ def get_diagnostic_zone(To: float, Vo: float) -> str:
     Returns:
         String: "normal", "borderline" ou "abnormal"
     """
-    # Zona vermelha (abnormal): To <= 20 OU Vo <= 2
     if To <= 20 or Vo <= 2:
         return "abnormal"
 
-    # Zona amarela (borderline): 20 < To <= 25
     if 20 < To <= 25:
         return "borderline"
 
-    # Zona amarela: triângulo de transição
     if To > 24:
         vo_limit = 4 - (To - 24) * 2 / 26
         if Vo <= vo_limit:

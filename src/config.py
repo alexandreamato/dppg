@@ -92,3 +92,53 @@ class AnalysisParams:
     # Coeficientes para cálculo de To (baseado em análise de laudos)
     # To = tau * TO_COEFFICIENT
     TO_COEFFICIENT = 2.6
+
+    # =========================================================================
+    # THRESHOLDS PARA CÁLCULO DE PARÂMETROS
+    # Confirmados via pseudocódigo de dppg 2.dll (fcn.100182c0)
+    # =========================================================================
+
+    # To: 97% de recuperação
+    # Usamos threshold crossing porque não temos end marker do hardware.
+    # No original, To = (end_marker - peak) / sr (markers do hardware).
+    THRESHOLD_TO = 0.03
+
+    # Th: 50% de recuperação (shift-right por 1 = divisão por 2)
+    # Confirmado: sar eax,1 em 0x100183AF
+    THRESHOLD_TH = 0.50
+
+    # =========================================================================
+    # PARÂMETROS DO Ti (Extrapolação Linear Adaptativa)
+    # Ti NÃO usa threshold crossing. Usa extrapolação linear do slope
+    # inicial de recuperação (confirmado no pseudocódigo de dppg 2.dll).
+    # =========================================================================
+
+    # Limiar de queda em 3 segundos para escolher janela (em unidades ADC)
+    # Se queda >= 10 ADC em 3s: usa janela de 3s (decaimento rápido)
+    # Se queda < 10 ADC em 3s: usa janela de 6s (decaimento lento)
+    TI_DELTA_THRESHOLD = 10
+
+    # Janelas de tempo para extrapolação (em segundos)
+    TI_FAST_WINDOW = 3   # Para sinais com decaimento rápido
+    TI_SLOW_WINDOW = 6   # Para sinais com decaimento lento
+
+    # Valor máximo de Ti (em segundos)
+    TI_MAX_SECONDS = 120
+
+    # Limiar de Vo para escolher método de detecção de pico
+    # Abaixo deste valor, usa máximo global (sinais patológicos)
+    # Acima, usa suavização (sinais normais)
+    LOW_AMPLITUDE_VO_THRESHOLD = 3.0
+
+    # =========================================================================
+    # PARÂMETROS DE EXTRAPOLAÇÃO
+    # Quando o sinal não cruza o threshold, usa extrapolação linear
+    # =========================================================================
+
+    # Tempo máximo de extrapolação em segundos (cap do Vasoview)
+    # Análise do banco de dados mostrou que 120s é o valor máximo usado
+    MAX_EXTRAPOLATION_TIME = 120.0
+
+    # Número de amostras para calcular o slope de extrapolação
+    # Usa os últimos N pontos para estimar a taxa de recuperação
+    EXTRAPOLATION_FIT_SAMPLES = 10

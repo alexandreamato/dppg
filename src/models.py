@@ -92,6 +92,17 @@ class PPGBlock:
         self.trimmed_count = len(samples) - len(self.samples)
         self._cached_parameters: Optional[PPGParameters] = None
 
+        # Hardware-provided values from metadata (decoded from protocol)
+        self.hw_baseline: Optional[int] = None      # Baseline ADC value
+        self.hw_peak_index: Optional[int] = None     # Peak sample index (peak_raw + 7)
+        self.hw_end_index: Optional[int] = None      # End index (peak_index + To_samples)
+        self.hw_amplitude: Optional[int] = None      # Peak - baseline (ADC units)
+        self.hw_To_samples: Optional[int] = None     # To in samples (end - peak)
+        self.hw_Th_samples: Optional[int] = None     # Th in samples
+        self.hw_Ti: Optional[int] = None             # Ti in seconds (integer)
+        self.hw_Fo_x100: Optional[int] = None        # Fo × 100 (0.01 %·s units)
+        self.hw_flags: Optional[int] = None          # Flags (0x00=normal, 0x80=no endpoint)
+
     def _trim_trailing_artifacts(self, samples: List[int]) -> List[int]:
         """
         Remove artefatos do final do bloco.

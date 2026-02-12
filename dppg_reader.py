@@ -6,7 +6,7 @@ Conecta ao aparelho Elcat Vasoquant 1000 via conversor Serial-WiFi WS1C
 Configuração padrão:
 - IP: 192.168.0.234
 - Porta TCP: 1100
-- Baud rate no conversor: 9600, 8N1, sem controle de fluxo
+- Baud rate no conversor: 9600, 8N2 (2 stop bits), sem controle de fluxo
 """
 
 import socket
@@ -59,6 +59,13 @@ ESTIMATED_SAMPLING_RATE = 4.0  # Hz
 # Fator de conversão ADC para %PPG (calibrado com laudo oficial)
 ADC_TO_PPG_FACTOR = 27.0  # ~27 unidades ADC = 1% PPG
 
+# Tempo máximo de extrapolação em segundos (cap do Vasoview)
+# Análise do banco de dados mostrou que 120s é o valor máximo usado
+MAX_EXTRAPOLATION_TIME = 120.0
+
+# Número de amostras para calcular o slope de extrapolação
+EXTRAPOLATION_FIT_SAMPLES = 10
+
 
 @dataclass
 class PPGParameters:
@@ -89,6 +96,17 @@ class PPGBlock:
         self.metadata_raw = metadata_raw  # Bytes brutos de metadados para análise
         self.timestamp = datetime.now()
         self.trimmed_count = len(samples) - len(self.samples)
+
+        # Hardware-provided values from metadata (decoded from protocol)
+        self.hw_baseline = None      # Baseline ADC value
+        self.hw_peak_index = None    # Peak sample index (peak_raw + 7)
+        self.hw_end_index = None     # End index (peak_index + To_samples)
+        self.hw_amplitude = None     # Peak - baseline (ADC units)
+        self.hw_To_samples = None    # To in samples (end - peak)
+        self.hw_Th_samples = None    # Th in samples
+        self.hw_Ti = None            # Ti in seconds (integer)
+        self.hw_Fo_x100 = None       # Fo × 100 (0.01 %·s units)
+        self.hw_flags = None         # Flags (0x00=normal, 0x80=no endpoint)
 
     def _trim_trailing_artifacts(self, samples):
         """Remove artefatos do final do bloco (bytes de controle interpretados como dados)"""
@@ -155,68 +173,68 @@ class PPGBlock:
         """
         Calcula os parâmetros quantitativos da curva D-PPG.
 
-        MÉTODO: Detecção direta de cruzamento (crossing detection)
-        Baseado na engenharia reversa do Vasoview original.
-
-        Em casos com torniquete, o sinal pode não retornar ao baseline
-        original. Usamos o valor estável final como referência para tempos.
+        Usa valores do hardware (baseline, peak, endpoint) quando disponíveis
+        nos metadados do protocolo. Caso contrário, calcula por software.
         """
         samples = np.array(self.samples, dtype=float)
 
         if len(samples) < 40:
             return None
 
-        # 1. BASELINES
-        # Inicial: antes do exercício (para Vo)
-        initial_baseline = float(np.median(samples[:10]))
-        # Estável: valor final (para tempos de recuperação)
+        sr = ESTIMATED_SAMPLING_RATE
+        has_hw = (
+            self.hw_baseline is not None and
+            self.hw_peak_index is not None and
+            self.hw_amplitude is not None
+        )
+
+        # 1. BASELINE
+        if has_hw:
+            initial_baseline = float(self.hw_baseline)
+        else:
+            initial_baseline = float(np.median(samples[:10]))
+
         stable_baseline = float(np.median(samples[-20:]))
 
-        # 2. DETECÇÃO DO PICO
-        # O pico ocorre no final do exercício de dorsiflexão.
-        # Usamos duas estratégias dependendo da amplitude do sinal:
-        # - Alta amplitude: suavização para evitar ruído
-        # - Baixa amplitude: máximo global na janela de exercício
-
-        # Primeiro, estimar amplitude para escolher método
-        global_max = float(np.max(samples))
-        estimated_amplitude = global_max - initial_baseline
-
-        # Janela típica de exercício: 5-25 segundos (índices 20-100 a 4Hz)
-        exercise_start = 5
-        exercise_end = min(25 * int(ESTIMATED_SAMPLING_RATE), len(samples) - 10)
-
-        if exercise_end <= exercise_start:
-            return None
-
-        # Para sinais de baixa amplitude (< 3% Vo), usar máximo na janela de exercício
-        # pois a suavização pode esconder picos isolados
-        estimated_vo = (estimated_amplitude / initial_baseline) * 100.0 if initial_baseline > 0 else 0
-
-        if estimated_vo < 3.0:
-            # Baixa amplitude: usar máximo global na janela de exercício
-            peak_idx = int(exercise_start + np.argmax(samples[exercise_start:exercise_end]))
+        # 2. PICO
+        if has_hw and self.hw_peak_index < len(samples):
+            peak_idx = self.hw_peak_index
+            peak_value = float(samples[peak_idx])
         else:
-            # Alta amplitude: usar suavização para robustez
-            window = 5
-            smoothed = np.convolve(samples, np.ones(window)/window, mode='valid')
-            offset = (window - 1) // 2
+            global_max = float(np.max(samples))
+            estimated_amplitude = global_max - initial_baseline
+            exercise_start = 5
+            exercise_end = min(25 * int(sr), len(samples) - 10)
 
-            # Buscar pico na região central (10% a 90% do sinal)
-            search_start = max(10, int(len(smoothed) * 0.1))
-            search_end = int(len(smoothed) * 0.9)
-
-            if search_end <= search_start:
+            if exercise_end <= exercise_start:
                 return None
 
-            peak_idx_smooth = int(np.argmax(smoothed[search_start:search_end]) + search_start)
-            peak_idx = peak_idx_smooth + offset
+            estimated_vo = (estimated_amplitude / initial_baseline) * 100.0 if initial_baseline > 0 else 0
 
-        peak_idx = min(peak_idx, len(samples) - 1)  # Garantir índice válido
-        peak_value = float(samples[peak_idx])
+            if estimated_vo < 3.0:
+                peak_idx = int(exercise_start + np.argmax(samples[exercise_start:exercise_end]))
+            else:
+                window = 5
+                smoothed = np.convolve(samples, np.ones(window)/window, mode='valid')
+                offset = (window - 1) // 2
+                search_start = max(10, int(len(smoothed) * 0.1))
+                search_end = int(len(smoothed) * 0.9)
 
-        # 3. CÁLCULO DE Vo (% do baseline INICIAL)
-        amplitude_vo = peak_value - initial_baseline
+                if search_end <= search_start:
+                    return None
+
+                peak_idx_smooth = int(np.argmax(smoothed[search_start:search_end]) + search_start)
+                peak_idx = peak_idx_smooth + offset
+
+            peak_idx = min(peak_idx, len(samples) - 1)
+            peak_value = float(samples[peak_idx])
+
+        # 3. Vo
+        if has_hw and self.hw_amplitude > 0:
+            amplitude_vo = float(self.hw_amplitude)
+        else:
+            amplitude_vo = peak_value - initial_baseline
+
         if amplitude_vo <= 0 or initial_baseline <= 0:
             return None
 
@@ -224,60 +242,74 @@ class PPGBlock:
         if Vo < 0.5:
             return None
 
-        # 4. DETECÇÃO DOS TEMPOS POR CRUZAMENTO
+        # 4. TEMPOS
         recovery_start = peak_idx
         recovery_samples = samples[recovery_start:]
 
         if len(recovery_samples) < 10:
             return None
 
-        # Amplitude de recuperação até baseline de REFERÊNCIA
-        # Para casos "s/ Tq", o sinal pode retornar ao baseline inicial ou ultrapassá-lo
-        reference_baseline = max(stable_baseline, initial_baseline)
-        amplitude_ref = peak_value - reference_baseline
-        if amplitude_ref <= 0:
-            amplitude_ref = amplitude_vo
-            reference_baseline = initial_baseline
+        sample_time = 1.0 / sr
 
-        # NÍVEIS DE CRUZAMENTO (extraído via disassembly da DLL dppg_2.dll)
-        # Th: 50% de recuperação relativo ao baseline INICIAL
-        level_Th = initial_baseline + amplitude_vo * 0.50
+        # 4a. Th
+        if has_hw and self.hw_Th_samples is not None and self.hw_Th_samples > 0:
+            Th = self.hw_Th_samples * sample_time
+        else:
+            level_Th = initial_baseline + amplitude_vo * 0.50
+            Th_samples_val = self._find_crossing(recovery_samples, level_Th)
+            if Th_samples_val is None:
+                Th_samples_val = self._extrapolate_crossing(recovery_samples, level_Th)
+            Th = Th_samples_val * sample_time if Th_samples_val else None
 
-        # Ti: 87.5% de recuperação relativo ao baseline de REFERÊNCIA (12.5% restante)
-        level_Ti = reference_baseline + amplitude_ref * 0.125
+        # 4b. Ti
+        if has_hw and self.hw_Ti is not None and self.hw_Ti > 0:
+            Ti = float(self.hw_Ti)
+        else:
+            reference_baseline = max(stable_baseline, initial_baseline)
+            amplitude_ref = peak_value - reference_baseline
+            if amplitude_ref <= 0:
+                amplitude_ref = amplitude_vo
+                reference_baseline = initial_baseline
+            level_Ti = reference_baseline + amplitude_ref * 0.125
+            Ti_samples_val = self._find_crossing(recovery_samples, level_Ti)
+            if Ti_samples_val is None:
+                Ti_samples_val = self._extrapolate_crossing(recovery_samples, level_Ti)
+            Ti = Ti_samples_val * sample_time if Ti_samples_val else None
 
-        # To: 97% de recuperação relativo ao baseline de REFERÊNCIA (3% restante)
-        level_To = reference_baseline + amplitude_ref * 0.03
-
-        # Encontrar cruzamentos
-        Th_samples = self._find_crossing(recovery_samples, level_Th)
-        Ti_samples = self._find_crossing(recovery_samples, level_Ti)
-        To_samples = self._find_crossing(recovery_samples, level_To)
-
-        # Extrapolar se necessário
-        if Th_samples is None:
-            Th_samples = self._extrapolate_crossing(recovery_samples, level_Th)
-        if Ti_samples is None:
-            Ti_samples = self._extrapolate_crossing(recovery_samples, level_Ti)
-        if To_samples is None:
-            To_samples = self._extrapolate_crossing(recovery_samples, level_To)
-
-        sample_time = 1.0 / ESTIMATED_SAMPLING_RATE
-        Th = Th_samples * sample_time if Th_samples else None
-        Ti = Ti_samples * sample_time if Ti_samples else None
-        To = To_samples * sample_time if To_samples else None
+        # 4c. To
+        if has_hw and self.hw_To_samples is not None and self.hw_To_samples > 0:
+            To_samples_val = self.hw_To_samples
+            To = To_samples_val * sample_time
+        else:
+            reference_baseline = max(stable_baseline, initial_baseline)
+            amplitude_ref = peak_value - reference_baseline
+            if amplitude_ref <= 0:
+                amplitude_ref = amplitude_vo
+                reference_baseline = initial_baseline
+            level_To = reference_baseline + amplitude_ref * 0.03
+            To_samples_val = self._find_crossing(recovery_samples, level_To)
+            if To_samples_val is None:
+                To_samples_val = self._extrapolate_crossing(recovery_samples, level_To)
+            To = To_samples_val * sample_time if To_samples_val else None
 
         if Th is None or Ti is None or To is None:
             return None
         if To <= 0 or Th <= 0 or Ti <= 0:
             return None
 
-        # 5. CÁLCULO DE Fo (Venous Refill Surface)
-        # Fo = Vo × Th (confirmado pela análise da DLL - unidade %s)
-        Fo = Vo * Th
+        # 5. Fo
+        if has_hw and self.hw_Fo_x100 is not None and self.hw_Fo_x100 > 0:
+            Fo = self.hw_Fo_x100 / 100.0
+        else:
+            Fo = Vo * Th
 
         # 6. ÍNDICES PARA VISUALIZAÇÃO
-        To_end_index = min(recovery_start + (int(To_samples) if To_samples else len(recovery_samples) - 1), len(samples) - 1)
+        if has_hw and self.hw_end_index is not None:
+            To_end_index = min(self.hw_end_index, len(samples) - 1)
+        elif To_samples_val is not None:
+            To_end_index = min(recovery_start + int(To_samples_val), len(samples) - 1)
+        else:
+            To_end_index = len(samples) - 1
 
         exercise_threshold = initial_baseline + amplitude_vo * 0.10
         exercise_start_index = 0
@@ -308,21 +340,51 @@ class PPGBlock:
         return None
 
     def _extrapolate_crossing(self, samples, level):
-        """Extrapola linearmente para encontrar cruzamento."""
+        """
+        Extrapola linearmente para encontrar quando o sinal cruzaria um nível.
+
+        Baseado na análise do banco de dados Vasoview:
+        - 36.7% dos casos usam extrapolação (Ti > To)
+        - O valor máximo é 120 segundos (cap do Vasoview)
+        - Usa os últimos pontos para estimar a taxa de recuperação
+        """
         if len(samples) < 10:
             return None
-        n_fit = max(10, len(samples) // 5)
-        fit_samples = samples[-n_fit:]
-        fit_indices = np.arange(len(samples) - n_fit, len(samples))
-        try:
-            slope, intercept = np.polyfit(fit_indices, fit_samples, 1)
-        except:
-            return None
-        if abs(slope) < 1e-6:
-            return None
-        crossing_idx = (level - intercept) / slope
-        if crossing_idx < 0 or crossing_idx > len(samples) * 2:
-            return None
+
+        # Usar últimos N pontos para estimar tendência de recuperação
+        n_fit = min(EXTRAPOLATION_FIT_SAMPLES, len(samples) // 2)
+        n_fit = max(n_fit, 5)  # Mínimo de 5 pontos
+
+        last_samples = samples[-n_fit:]
+        last_value = float(samples[-1])
+
+        # Calcular slope médio (taxa de recuperação)
+        # Slope negativo = sinal descendo (recuperando)
+        slope = (last_samples[-1] - last_samples[0]) / (n_fit - 1)
+
+        # Se slope >= 0, sinal não está recuperando - usar valor máximo
+        if slope >= 0:
+            max_samples = MAX_EXTRAPOLATION_TIME * ESTIMATED_SAMPLING_RATE
+            return max_samples
+
+        # Calcular quantas amostras adicionais até cruzar o nível
+        remaining = last_value - level
+
+        if remaining <= 0:
+            # Já cruzou ou está no nível
+            return float(len(samples) - 1)
+
+        # Tempo adicional = amplitude restante / taxa de recuperação
+        additional_samples = remaining / abs(slope)
+
+        # Índice total do cruzamento
+        crossing_idx = len(samples) - 1 + additional_samples
+
+        # Aplicar cap de 120 segundos (como o Vasoview faz)
+        max_samples = MAX_EXTRAPOLATION_TIME * ESTIMATED_SAMPLING_RATE
+        if crossing_idx > max_samples:
+            crossing_idx = max_samples
+
         return crossing_idx
 
     def __repr__(self):
@@ -348,10 +410,11 @@ class DPPGReader:
     GS = 0x1D
     CR = 0x0D  # Carriage Return para protocolo ASCII
 
-    # Comandos de polling
-    CMD_CHECK = b"TST:CHECK\r"  # Protocolo ASCII
+    # Comandos de polling e handshake
     CMD_ENQ = bytes([0x05])     # Polling binário simples (ENQ)
     CMD_DLE_ENQ = bytes([0x10, 0x05])  # Polling DLE-framed
+    CMD_HANDSHAKE = bytes([0x06, 0x1B, 0x49])  # ACK+ESC+I - handshake completo ao DLE
+    CMD_ACK = bytes([0x06])     # ACK simples - resposta a blocos de dados
     # Baseado na análise do API Monitor: Vasoview usa timeouts muito longos/infinitos
     # e não faz polling ativo - apenas responde ao polling DLE do dispositivo
     KEEPALIVE_INTERVAL_MS = 5000  # 5 segundos - polling passivo (só se necessário)
@@ -374,6 +437,13 @@ class DPPGReader:
         self.running = False
         self.last_data_time = None
 
+        # Handshake e identificação do dispositivo
+        self.awaiting_id_response = False  # Esperando resposta de 13 bytes após handshake
+        self.id_buffer = bytearray()  # Buffer para acumular resposta de ID
+        self.device_serial = None  # Serial number do VQ1000
+        self.device_firmware = None  # Versão do firmware
+        self.device_protocol = None  # "antigo" ou "estendido"
+
         # Thread safety: queue para dados recebidos
         self.data_queue = queue.Queue()
         self.buffer_lock = threading.Lock()
@@ -395,7 +465,7 @@ class DPPGReader:
         self.show_ppg_percent = tk.BooleanVar(value=True)
 
         # Opção de protocolo de keep-alive/polling
-        # Modos: "Passivo" (só ACK), "ENQ" (binário), "TST:CHECK" (ASCII), "Desativado"
+        # Modos: "Passivo" (só responde DLE), "ENQ (0x05)" (binário ativo), "Desativado"
         # Baseado na análise do Vasoview: modo passivo é mais estável
         self.polling_mode = tk.StringVar(value="Passivo")  # Passivo = sem polling, só ACK
         self.keepalive_timer_id = None
@@ -433,7 +503,7 @@ class DPPGReader:
 
         ttk.Label(config_frame, text="Polling:").grid(row=0, column=6, padx=(10, 0))
         polling_combo = ttk.Combobox(config_frame, textvariable=self.polling_mode,
-                                      values=["Passivo", "ENQ", "TST:CHECK", "Desativado"], width=10, state="readonly")
+                                      values=["Passivo", "ENQ (0x05)", "Desativado"], width=12, state="readonly")
         polling_combo.grid(row=0, column=7, padx=5)
 
         ttk.Checkbutton(config_frame, text="Auto-reconectar", variable=self.auto_reconnect).grid(row=0, column=8, padx=10)
@@ -538,23 +608,23 @@ class DPPGReader:
         ttk.Button(row2, text="STX+EOT+ETX", width=14,
                    command=lambda: self.debug_send(b'\x02\x04\x03', "EOT binário")).pack(side=tk.LEFT, padx=2)
 
-        # Linha 3: Comandos ASCII (terminados por CR=0x0D, não \r)
+        # Linha 3: Comandos ESC binários do VQ1000
         row3 = ttk.Frame(debug_frame)
         row3.pack(fill=tk.X, pady=2)
 
-        ttk.Label(row3, text="ASCII+CR:", width=10).pack(side=tk.LEFT)
-        ttk.Label(row3, text="(CR=0x0D)", foreground="gray").pack(side=tk.LEFT)
+        ttk.Label(row3, text="VQ1000 ESC:", width=10).pack(side=tk.LEFT)
+        ttk.Label(row3, text="(comandos binários)", foreground="gray").pack(side=tk.LEFT)
 
-        ttk.Button(row3, text="TST:CHECK", width=12,
-                   command=lambda: self.debug_send(b'TST:CHECK\x0D', "TST:CHECK+CR")).pack(side=tk.LEFT, padx=2)
-        ttk.Button(row3, text="MSG:STAT/0", width=12,
-                   command=lambda: self.debug_send(b'MSG:STAT/0\x0D', "MSG:STAT/0+CR")).pack(side=tk.LEFT, padx=2)
-        ttk.Button(row3, text="MSG:STAT/4", width=12,
-                   command=lambda: self.debug_send(b'MSG:STAT/4\x0D', "MSG:STAT/4+CR")).pack(side=tk.LEFT, padx=2)
-        ttk.Button(row3, text="ACQ:START", width=12,
-                   command=lambda: self.debug_send(b'ACQ:START\x0D', "ACQ:START+CR")).pack(side=tk.LEFT, padx=2)
-        ttk.Button(row3, text="ACQ:STOP", width=12,
-                   command=lambda: self.debug_send(b'ACQ:STOP\x0D', "ACQ:STOP+CR")).pack(side=tk.LEFT, padx=2)
+        ttk.Button(row3, text="Handshake", width=12,
+                   command=lambda: self.debug_send(b'\x06\x1B\x49', "ACK+ESC+I (handshake)")).pack(side=tk.LEFT, padx=2)
+        ttk.Button(row3, text="Get Config", width=12,
+                   command=lambda: self.debug_send(b'\x1B\x4B\x3F', "ESC K ? (get config)")).pack(side=tk.LEFT, padx=2)
+        ttk.Button(row3, text="List Exams", width=12,
+                   command=lambda: self.debug_send(b'\x1B\x55\x3F', "ESC U ? (list exams)")).pack(side=tk.LEFT, padx=2)
+        ttk.Button(row3, text="Keep-alive", width=12,
+                   command=lambda: self.debug_send(b'\x1B\x6B', "ESC k (keep-alive)")).pack(side=tk.LEFT, padx=2)
+        ttk.Button(row3, text="Disconnect", width=12,
+                   command=lambda: self.debug_send(b'\x1B\x44', "ESC D (disconnect)")).pack(side=tk.LEFT, padx=2)
 
         # Linha 4: Entrada customizada
         row4 = ttk.Frame(debug_frame)
@@ -571,7 +641,7 @@ class DPPGReader:
 
         self.debug_ascii_entry = ttk.Entry(row4, width=25)
         self.debug_ascii_entry.pack(side=tk.LEFT, padx=2)
-        self.debug_ascii_entry.insert(0, "TST:CHECK")
+        self.debug_ascii_entry.insert(0, "")  # ASCII commands are VL320-only
 
         ttk.Button(row4, text="ASCII+CR", width=10,
                    command=self.debug_send_custom_ascii).pack(side=tk.LEFT, padx=2)
@@ -1177,6 +1247,17 @@ class DPPGReader:
                     "trimmed_count": int(b.trimmed_count),
                     "samples_raw": samples_raw_list,
                     "metadata_hex": b.metadata_raw.hex() if b.metadata_raw else None,
+                    "hw_metadata": {
+                        "baseline": b.hw_baseline,
+                        "peak_index": b.hw_peak_index,
+                        "end_index": b.hw_end_index,
+                        "amplitude": b.hw_amplitude,
+                        "To_samples": b.hw_To_samples,
+                        "Th_samples": b.hw_Th_samples,
+                        "Ti_s": b.hw_Ti,
+                        "Fo_x100": b.hw_Fo_x100,
+                        "flags": b.hw_flags,
+                    } if b.hw_baseline is not None else None,
                     "parameters": {
                         "To_s": float(params.To),
                         "Th_s": float(params.Th),
@@ -1269,6 +1350,56 @@ class DPPGReader:
             hex_str = ' '.join(f'{b:02X}' for b in data[:20]) + '...'
         self.debug_last_rx.config(text=f"Último RX: [{hex_str}] ({len(data)} bytes)")
 
+    def _parse_id_response(self, data: bytes):
+        """Parseia a resposta de identificação de 13 bytes do VQ1000.
+
+        Formato da resposta após handshake ACK+ESC+I:
+        Byte 0:    SOH (0x01) - Start of Header
+        Byte 1:    Tipo de dispositivo
+        Bytes 2-6: Serial number (5 bytes ASCII ou BCD)
+        Bytes 7-8: Versão do protocolo (2 bytes)
+        Bytes 9-10: Firmware version (BCD)
+        Byte 11:   EOT (0x04)
+        Byte 12:   CR (0x0D)
+        """
+        try:
+            hex_str = ' '.join(f'{b:02X}' for b in data)
+            self.root.after(0, lambda h=hex_str: self.log(f"ID response (13 bytes): {h}", "info"))
+
+            if len(data) < 13:
+                return
+
+            # Extrair serial number (bytes 2-6)
+            serial_bytes = data[2:7]
+            # Tentar como ASCII primeiro, senão como BCD
+            try:
+                serial = serial_bytes.decode('ascii').strip('\x00')
+            except (UnicodeDecodeError, ValueError):
+                serial = ''.join(f'{b:02X}' for b in serial_bytes)
+            self.device_serial = serial
+
+            # Versão do protocolo (bytes 7-8)
+            proto_hi, proto_lo = data[7], data[8]
+            if proto_hi == 0x0A and proto_lo == 0x01:
+                self.device_protocol = "antigo"
+            elif proto_hi == 0x14 and proto_lo == 0xFF:
+                self.device_protocol = "estendido"
+            else:
+                self.device_protocol = f"desconhecido ({proto_hi:02X}.{proto_lo:02X})"
+
+            # Firmware version (bytes 9-10, BCD)
+            fw_major = data[9]
+            fw_minor = data[10]
+            self.device_firmware = f"{fw_major >> 4}{fw_major & 0x0F}.{fw_minor >> 4}{fw_minor & 0x0F}"
+
+            info_msg = f"VQ1000 S/N: {self.device_serial}, FW: {self.device_firmware}, Protocolo: {self.device_protocol}"
+            self.root.after(0, lambda msg=info_msg: self.log(msg, "info"))
+            self.root.after(0, lambda msg=info_msg: self.status_label.config(
+                text=f"Online - {msg}", foreground="green"))
+
+        except Exception as e:
+            self.root.after(0, lambda e=e: self.log(f"Erro ao parsear ID: {e}", "error"))
+
     def _send_keepalive(self):
         """Envia comando de polling para manter conexão ativa"""
         mode = self.polling_mode.get()
@@ -1277,15 +1408,11 @@ class DPPGReader:
             return
 
         try:
-            if mode == "ENQ":
+            if mode == "ENQ (0x05)":
                 # Polling binário - ENQ (0x05)
-                # Mais compatível com modo de emulação de impressora
+                # Keep-alive usado quando autenticado (após handshake)
                 self.socket.send(self.CMD_ENQ)
                 self.log("TX: ENQ (polling)", "sent")
-            elif mode == "TST:CHECK":
-                # Protocolo ASCII alternativo
-                self.socket.send(self.CMD_CHECK)
-                self.log("TX: TST:CHECK", "sent")
         except Exception as e:
             self.log(f"Erro ao enviar polling: {e}", "error")
 
@@ -1305,7 +1432,7 @@ class DPPGReader:
             self._send_keepalive()
 
     def _stop_keepalive(self):
-        """Para o timer de keep-alive TST:CHECK"""
+        """Para o timer de keep-alive"""
         if self.keepalive_timer_id:
             self.root.after_cancel(self.keepalive_timer_id)
             self.keepalive_timer_id = None
@@ -1361,7 +1488,7 @@ class DPPGReader:
             self.receive_thread = threading.Thread(target=self.receive_loop, daemon=True)
             self.receive_thread.start()
 
-            # Iniciar keep-alive TST:CHECK se habilitado
+            # Iniciar keep-alive se habilitado
             self._start_keepalive()
 
         except socket.timeout:
@@ -1373,6 +1500,8 @@ class DPPGReader:
         self.running = False
         self.connected = False
         self.printer_online = False
+        self.awaiting_id_response = False
+        self.id_buffer.clear()
 
         # Parar keep-alive
         self._stop_keepalive()
@@ -1477,29 +1606,48 @@ class DPPGReader:
         # Atualizar display de debug
         self.root.after(0, lambda d=data: self.debug_update_last_rx(d))
 
-        # Auto-ACK: SEMPRE responder com ACK para manter impressora "online"
-        # O ACK é necessário para o protocolo de impressora, independente do TST:CHECK
+        # Auto-resposta: manter impressora "online"
+        # DLE isolado (0x10) = polling → handshake completo (ACK+ESC+I = 3 bytes)
+        # Blocos de dados → ACK simples (1 byte)
         # A menos que o modo de debug tenha pausado o auto-ACK
         if self.socket and not self.auto_ack_paused:
+            is_dle_polling = (len(data) == 1 and data[0] == self.DLE)
             try:
-                self.socket.send(b'\x06')
-                # Captura bruta - salvar TX também
+                if is_dle_polling:
+                    # DLE isolado: enviar handshake completo (como o Vasoview faz)
+                    self.socket.send(self.CMD_HANDSHAKE)
+                    self.awaiting_id_response = True
+                    self.id_buffer.clear()
+                    tx_bytes = self.CMD_HANDSHAKE
+                    self.root.after(0, lambda: self.log("TX: ACK+ESC+I (handshake)", "sent"))
+                else:
+                    # Checar se estamos esperando resposta de ID (13 bytes após handshake)
+                    if self.awaiting_id_response:
+                        self.id_buffer.extend(data)
+                        if len(self.id_buffer) >= 13:
+                            self._parse_id_response(bytes(self.id_buffer[:13]))
+                            self.awaiting_id_response = False
+                            self.id_buffer.clear()
+                    # Bloco de dados: enviar ACK simples
+                    self.socket.send(self.CMD_ACK)
+                    tx_bytes = self.CMD_ACK
+                    if len(data) <= 3:
+                        self.root.after(0, lambda: self.log("TX: ACK", "sent"))
+                # Captura bruta - salvar TX
                 if self.capture_enabled and self.raw_capture_file:
                     try:
                         import struct
                         import time
                         ts = int(time.time() * 1000) & 0xFFFFFFFF
-                        self.raw_capture_file.write(struct.pack('<IBH', ts, 0x54, 1))  # 0x54 = 'T' (TX)
-                        self.raw_capture_file.write(b'\x06')
+                        self.raw_capture_file.write(struct.pack('<IBH', ts, 0x54, len(tx_bytes)))
+                        self.raw_capture_file.write(tx_bytes)
                         self.raw_capture_file.flush()
                     except:
                         pass
-                if len(data) <= 3:
-                    self.root.after(0, lambda: self.log("TX: ACK", "sent"))
             except Exception as e:
-                self.root.after(0, lambda e=e: self.log(f"Erro ao enviar ACK: {e}", "error"))
+                self.root.after(0, lambda e=e: self.log(f"Erro ao enviar resposta: {e}", "error"))
         elif self.auto_ack_paused:
-            self.root.after(0, lambda: self.log("Auto-ACK pausado - NÃO enviando ACK", "info"))
+            self.root.after(0, lambda: self.log("Auto-ACK pausado - NÃO enviando", "info"))
 
         # Adicionar à queue (thread-safe)
         self.data_queue.put(bytes(data))
@@ -1566,10 +1714,29 @@ class DPPGReader:
                 metadata_end = min(metadata_start + 40, len(self.data_buffer))
                 metadata_raw = bytes(self.data_buffer[metadata_start:metadata_end])
 
-                # Tentar extrair número do exame dos metadados
-                # Padrão observado: 1D XX XX 00 00 00 1D YY YY
-                # O número do exame está no SEGUNDO GS (após 00 00 00)
+                # ============================================================
+                # DECODIFICAÇÃO DOS METADADOS DO PROTOCOLO
+                # Formato decodificado via análise empírica (32 blocos verificados):
+                #
+                # Byte 0:      0x1D (GS marker)
+                # Bytes 1-2:   baseline (16-bit LE, ADC units)
+                # Bytes 3-5:   00 00 00 (separator)
+                # Byte 6:      0x1D (GS marker)
+                # Bytes 7-8:   exam_number (16-bit LE)
+                # --- PAYLOAD (parâmetros calculados pelo hardware) ---
+                # Byte 9:      To_samples (end_index - peak_index)
+                # Byte 10:     Th_samples (amostras até 50% recuperação)
+                # Bytes 11-12: amplitude (16-bit LE, peak - baseline)
+                # Bytes 13-14: Fo × 100 (16-bit LE, em 0.01 %·s)
+                # Byte 15:     peak_raw (peak_index = peak_raw + 7)
+                # Byte 16:     Ti (segundos, inteiro)
+                # Byte 17:     flags (0x00=normal, 0x80=sem endpoint)
+                # Byte 18:     0x04 (EOT)
+                # ============================================================
                 exam_number = None
+                hw_baseline = None
+                payload_start = None
+
                 for i in range(len(metadata_raw) - 5):
                     if (metadata_raw[i] == 0x00 and
                         metadata_raw[i + 1] == 0x00 and
@@ -1581,12 +1748,39 @@ class DPPGReader:
                         exam_number = exam_low | (exam_high << 8)
                         # Validar: números de exame típicos são 1-9999
                         if 1 <= exam_number <= 9999:
+                            payload_start = i + 6
                             break
                         else:
                             exam_number = None
 
+                # Extrair baseline (bytes 1-2 após primeiro GS)
+                if len(metadata_raw) >= 3 and metadata_raw[0] == self.GS:
+                    hw_baseline = metadata_raw[1] | (metadata_raw[2] << 8)
+
                 # Criar bloco com metadados
                 block = PPGBlock(label_byte, samples, exam_number, metadata_raw)
+
+                # Preencher valores do hardware a partir do payload
+                if hw_baseline is not None:
+                    block.hw_baseline = hw_baseline
+
+                if payload_start is not None and payload_start + 10 <= len(metadata_raw):
+                    payload = metadata_raw[payload_start:]
+                    sr = int(ESTIMATED_SAMPLING_RATE)
+
+                    block.hw_To_samples = payload[0]
+                    block.hw_Th_samples = payload[1]
+                    block.hw_amplitude = payload[2] | (payload[3] << 8)
+                    block.hw_Fo_x100 = payload[4] | (payload[5] << 8)
+
+                    peak_raw = payload[6]
+                    block.hw_peak_index = peak_raw + 2 * sr - 1  # peak_raw + 7
+
+                    block.hw_Ti = payload[7]
+                    block.hw_flags = payload[8]
+
+                    # Calcular end_index
+                    block.hw_end_index = block.hw_peak_index + block.hw_To_samples
                 self.ppg_blocks.append(block)
 
                 # Se encontrou exam_number, aplicar retroativamente a blocos sem número

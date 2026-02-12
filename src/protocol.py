@@ -11,7 +11,7 @@ Formato do protocolo:
 from typing import Optional, Tuple, List
 from dataclasses import dataclass
 
-from .config import Protocol
+from .config import Protocol, ESTIMATED_SAMPLING_RATE
 from .models import PPGBlock
 
 
@@ -108,11 +108,23 @@ def _try_parse_block(buffer: bytearray) -> ParseResult:
     metadata_end = min(metadata_start + 40, len(buffer))
     metadata_raw = bytes(buffer[metadata_start:metadata_end])
 
-    # Extrair número do exame
-    exam_number = _extract_exam_number(metadata_raw)
+    # Extrair número do exame e payload dos metadados
+    exam_number, payload_start = _extract_exam_number(metadata_raw)
+
+    # Extrair baseline (bytes 1-2 após primeiro GS)
+    hw_baseline = None
+    if len(metadata_raw) >= 3 and metadata_raw[0] == Protocol.GS:
+        hw_baseline = metadata_raw[1] | (metadata_raw[2] << 8)
 
     # Criar bloco
     block = PPGBlock(label_byte, samples, exam_number, metadata_raw)
+
+    # Preencher valores do hardware a partir do payload
+    if hw_baseline is not None:
+        block.hw_baseline = hw_baseline
+
+    if payload_start is not None and payload_start + 10 <= len(metadata_raw):
+        _extract_hw_metadata(block, metadata_raw[payload_start:])
 
     # Calcular bytes consumidos (até próximo ESC ou fim dos metadados)
     next_start = _find_next_block_start(buffer, data_end)
@@ -150,12 +162,15 @@ def _extract_samples(buffer: bytearray, start: int, end: int) -> List[int]:
     return samples
 
 
-def _extract_exam_number(metadata: bytes) -> Optional[int]:
+def _extract_exam_number(metadata: bytes) -> Tuple[Optional[int], Optional[int]]:
     """
     Extrai o número do exame dos metadados.
 
-    Padrão observado: 00 00 00 GS LL HH
+    Padrão observado: 00 00 00 GS LL HH [payload...]
     onde HHLL é o número do exame em little-endian.
+
+    Returns:
+        Tupla (exam_number, payload_start_index) ou (None, None)
     """
     for i in range(len(metadata) - 5):
         if (metadata[i] == 0x00 and
@@ -169,9 +184,44 @@ def _extract_exam_number(metadata: bytes) -> Optional[int]:
 
             # Validar: números típicos são 1-9999
             if 1 <= exam_number <= 9999:
-                return exam_number
+                return exam_number, i + 6
 
-    return None
+    return None, None
+
+
+def _extract_hw_metadata(block: PPGBlock, payload: bytes) -> None:
+    """
+    Extrai parâmetros calculados pelo hardware do payload de metadados.
+
+    Formato do payload (10 bytes, verificado em 32 blocos):
+        Byte 0:    To_samples (end_index - peak_index, em amostras)
+        Byte 1:    Th_samples (amostras até 50% recuperação)
+        Bytes 2-3: amplitude (16-bit LE, peak - baseline, ADC)
+        Bytes 4-5: Fo × 100 (16-bit LE, em 0.01 %·s)
+        Byte 6:    peak_raw (peak_index = peak_raw + 2×sr - 1)
+        Byte 7:    Ti (segundos, inteiro)
+        Byte 8:    flags (0x00=normal, 0x80=sem endpoint)
+        Byte 9:    0x04 (EOT)
+
+    Args:
+        block: Bloco PPG para preencher
+        payload: Bytes do payload (a partir de após exam_number)
+    """
+    sr = int(ESTIMATED_SAMPLING_RATE)
+
+    block.hw_To_samples = payload[0]
+    block.hw_Th_samples = payload[1]
+    block.hw_amplitude = payload[2] | (payload[3] << 8)
+    block.hw_Fo_x100 = payload[4] | (payload[5] << 8)
+
+    peak_raw = payload[6]
+    block.hw_peak_index = peak_raw + 2 * sr - 1  # peak_raw + 7
+
+    block.hw_Ti = payload[7]
+    block.hw_flags = payload[8]
+
+    # Calcular end_index
+    block.hw_end_index = block.hw_peak_index + block.hw_To_samples
 
 
 def _find_next_block_start(buffer: bytearray, start: int) -> int:

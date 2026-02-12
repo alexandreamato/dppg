@@ -104,6 +104,17 @@ def export_json(
             "trimmed_count": block.trimmed_count,
             "samples_raw": block.samples_raw if block.trimmed_count > 0 else None,
             "metadata_hex": block.metadata_raw.hex() if block.metadata_raw else None,
+            "hw_metadata": {
+                "baseline": block.hw_baseline,
+                "peak_index": block.hw_peak_index,
+                "end_index": block.hw_end_index,
+                "amplitude": block.hw_amplitude,
+                "To_samples": block.hw_To_samples,
+                "Th_samples": block.hw_Th_samples,
+                "Ti_s": block.hw_Ti,
+                "Fo_x100": block.hw_Fo_x100,
+                "flags": block.hw_flags,
+            } if getattr(block, 'hw_baseline', None) is not None else None,
             "parameters": params.to_dict() if params else None,
         }
         blocks_data.append(block_data)
