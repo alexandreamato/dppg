@@ -85,12 +85,14 @@ class ReportEditorView(ttk.Frame):
     def _regenerate(self):
         """Regenerate diagnosis text from channel parameters."""
         channels = {}
+        params_objects = {}
         for lb, block in self.blocks.items():
             p = calculate_parameters(block)
             if p:
                 channels[lb] = {"To": p.To, "Th": p.Th, "Ti": p.Ti, "Vo": p.Vo, "Fo": p.Fo}
+                params_objects[lb] = p
 
-        text = generate_diagnosis(channels)
+        text = generate_diagnosis(channels, params_objects=params_objects)
         self.diagnosis_text.delete("1.0", tk.END)
         self.diagnosis_text.insert("1.0", text)
 

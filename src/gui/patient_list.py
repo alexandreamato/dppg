@@ -37,7 +37,6 @@ class PatientListView(ttk.Frame):
 
         ttk.Button(top, text="Novo Paciente", command=self._new_patient).pack(side=tk.LEFT, padx=10)
         ttk.Button(top, text="Capturar", command=self._on_capture).pack(side=tk.LEFT, padx=5)
-        ttk.Button(top, text="Configurações", command=self._on_settings).pack(side=tk.RIGHT, padx=5)
 
         # Patient list
         list_frame = ttk.Frame(self)

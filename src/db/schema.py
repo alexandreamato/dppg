@@ -1,6 +1,7 @@
 """SQLAlchemy models for D-PPG Manager database."""
 
 import os
+import sys
 from datetime import datetime, date
 
 from sqlalchemy import (
@@ -11,7 +12,20 @@ from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 
 Base = declarative_base()
 
-DB_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "dppg_manager.db")
+def _default_db_path():
+    """Determine DB path: user Documents folder for bundled app, project root for dev."""
+    if getattr(sys, 'frozen', False):
+        # Running as PyInstaller bundle — store in ~/Documents/DPPG Manager/
+        docs = os.path.join(os.path.expanduser("~"), "Documents", "DPPG Manager")
+        os.makedirs(docs, exist_ok=True)
+        return os.path.join(docs, "dppg_manager.db")
+    else:
+        # Development — project root
+        return os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+                            "dppg_manager.db")
+
+
+DB_PATH = _default_db_path()
 
 
 class Settings(Base):

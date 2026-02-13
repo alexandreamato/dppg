@@ -11,7 +11,7 @@ from reportlab.pdfgen.canvas import Canvas
 from reportlab.lib.utils import ImageReader
 
 from ..models import PPGBlock
-from ..analysis import calculate_parameters
+from ..analysis import calculate_parameters, bilateral_asymmetry, tourniquet_effect
 from ..config import LABEL_DESCRIPTIONS
 from ..diagnosis.classifier import classify_channel, classify_pump, VenousGrade
 from ..diagnosis.text_generator import generate_classification_table
@@ -22,7 +22,7 @@ from .templates import (
     COLOR_CYAN, COLOR_BLACK, COLOR_GRAY, COLOR_RED,
     METHOD_TEXT, PARAM_DESCRIPTIONS, CHANNEL_GRID, CHANNEL_POINT_INFO,
 )
-from .chart_renderer import render_ppg_chart, render_diagnostic_chart
+from .chart_renderer import render_ppg_chart, render_diagnostic_chart, render_bilateral_radar
 
 BIBLIOGRAPHY = (
     "Amato ACM. Propedêutica vascular. São Paulo: Amato - Instituto de Medicina "
@@ -72,11 +72,11 @@ def generate_report_pdf(
         c.drawString(MARGIN_LEFT, y, label)
         y -= 9
 
-    y -= 3
+    y -= 2
     c.setStrokeColorRGB(*COLOR_CYAN)
     c.setLineWidth(1)
     c.line(MARGIN_LEFT, y, w - MARGIN_RIGHT, y)
-    y -= 10
+    y -= 8
 
     # ================================================================
     # 2. PATIENT DATA
@@ -95,7 +95,7 @@ def generate_report_pdf(
     if info_parts:
         c.setFont("Helvetica", FONT_BODY)
         c.drawRightString(w - MARGIN_RIGHT, y, "  |  ".join(info_parts))
-    y -= 14
+    y -= 12
 
     # ================================================================
     # 3. APPLICATION LINE
@@ -104,7 +104,7 @@ def generate_report_pdf(
     c.setFillColorRGB(*COLOR_GRAY)
     c.drawString(MARGIN_LEFT, y, report_app_line)
     c.drawRightString(w - MARGIN_RIGHT, y, f"Data: {exam_date.strftime('%d/%m/%Y')}")
-    y -= 14
+    y -= 12
 
     # ================================================================
     # 4. PPG CHARTS (2x2 grid) — reduced height for single page
@@ -132,9 +132,9 @@ def generate_report_pdf(
             img = ImageReader(io.BytesIO(png_data))
             c.drawImage(img, x_pos, y - chart_h_pt, chart_w_pt, chart_h_pt)
 
-        y -= chart_h_pt + 5
+        y -= chart_h_pt + 3
 
-    y -= 3
+    y -= 2
 
     # ================================================================
     # 5. PARAMETERS TABLE + DIAGNOSTIC CHART (side by side)
@@ -161,7 +161,7 @@ def generate_report_pdf(
 
     diag_gap = 15
     diag_w_pt = CONTENT_WIDTH - table_w - diag_gap
-    diag_h_pt = 110
+    diag_h_pt = 100
     diag_w_in = diag_w_pt / 72
     diag_h_in = diag_h_pt / 72
 
@@ -171,16 +171,18 @@ def generate_report_pdf(
         c.drawImage(ImageReader(io.BytesIO(diag_png)), diag_x,
                      y_table_start - diag_h_pt, diag_w_pt, diag_h_pt)
 
-    y = min(y_after_table, y_table_start - diag_h_pt) - 6
+    y = min(y_after_table, y_table_start - diag_h_pt) - 4
 
     # ================================================================
-    # 6. METHOD TEXT + CLASSIFICATION TABLE (side by side)
+    # 6. METHOD TEXT + CLASSIFICATION TABLE (left) + RADAR CHART (right)
     # ================================================================
-    # Left: method text (narrower)
-    method_w = CONTENT_WIDTH * 0.55
+    left_w = CONTENT_WIDTH * 0.52
+    y_section6_start = y
+
+    # Left: method text
     c.setFont("Helvetica-Oblique", 6.5)
     c.setFillColorRGB(*COLOR_GRAY)
-    wrapped_method = _wrap_text(METHOD_TEXT, method_w, "Helvetica-Oblique", 6.5, c)
+    wrapped_method = _wrap_text(METHOD_TEXT, left_w, "Helvetica-Oblique", 6.5, c)
     text_obj = c.beginText(MARGIN_LEFT, y)
     text_obj.setFont("Helvetica-Oblique", 6.5)
     text_obj.setFillColorRGB(*COLOR_GRAY)
@@ -189,19 +191,35 @@ def generate_report_pdf(
     c.drawText(text_obj)
     y_after_method = y - (6.5 + 1.5) * len(wrapped_method)
 
-    # Right: classification table
+    # Left: classification table (below method text)
     channels_dict = {}
     for lb, p in params_by_label.items():
         channels_dict[lb] = {"To": p.To, "Th": p.Th, "Ti": p.Ti, "Vo": p.Vo, "Fo": p.Fo}
     class_rows = generate_classification_table(channels_dict)
     if class_rows:
-        class_x = MARGIN_LEFT + CONTENT_WIDTH * 0.58
-        y_after_class = _draw_classification_table(c, y, class_rows,
-                                                    x_offset=class_x)
+        y_after_class = _draw_classification_table(c, y_after_method - 4, class_rows,
+                                                    x_offset=MARGIN_LEFT)
     else:
-        y_after_class = y
+        y_after_class = y_after_method
 
-    y = min(y_after_method, y_after_class) - 6
+    # Right: bilateral radar chart (rendered square to avoid distortion)
+    radar_gap = 10
+    radar_size_pt = 115  # square: same width and height
+    radar_size_in = radar_size_pt / 72
+    radar_x = MARGIN_LEFT + left_w + radar_gap + (CONTENT_WIDTH - left_w - radar_gap - radar_size_pt) / 2
+
+    radar_png = render_bilateral_radar(params_by_label, radar_size_in, radar_size_in, dpi)
+    if radar_png:
+        c.drawImage(ImageReader(io.BytesIO(radar_png)), radar_x,
+                     y_section6_start - radar_size_pt, radar_size_pt, radar_size_pt)
+
+    y_after_right = y_section6_start - radar_size_pt if radar_png else y_section6_start
+    y = min(y_after_class, y_after_right) - 4
+
+    # ================================================================
+    # 6b. ADVANCED ANALYSIS (asymmetry + tourniquet effect)
+    # ================================================================
+    y = _draw_advanced_analysis(c, y, params_by_label)
 
     # ================================================================
     # 7. COMPLAINTS
@@ -272,6 +290,7 @@ def _draw_params_table(c: Canvas, y: float, params: Dict,
         ("Ti (s)", "Ti"),
         ("Vo (%)", "Vo"),
         ("Fo (%s)", "Fo"),
+        ("\u03c4 (s)", "tau"),
     ]
 
     # Header
@@ -302,7 +321,7 @@ def _draw_params_table(c: Canvas, y: float, params: Dict,
             p = params.get(lb)
             val = getattr(p, attr, None) if p else None
             if val is not None:
-                text = str(int(val)) if attr == "Fo" else str(val)
+                text = str(int(val)) if attr in ("Fo", "Ti") else str(val)
                 is_abnormal = False
                 if attr == "To" and classify_channel(val) != VenousGrade.NORMAL:
                     is_abnormal = True
@@ -370,6 +389,75 @@ def _draw_classification_table(c: Canvas, y: float, rows: list,
 
         y -= 10
 
+    return y
+
+
+def _draw_advanced_analysis(c: Canvas, y: float, params: Dict) -> float:
+    """Draw the advanced analysis section: asymmetry + tourniquet effect."""
+    lines = []
+
+    # Bilateral asymmetry
+    p_mie = params.get(0xDF)
+    p_mid = params.get(0xE1)
+    if p_mie and p_mid:
+        asym = bilateral_asymmetry(p_mie, p_mid)
+        if asym:
+            parts = []
+            for attr, pct in asym.items():
+                val_mie = getattr(p_mie, attr)
+                val_mid = getattr(p_mid, attr)
+                unit = "s" if attr in ("To", "tau") else "%"
+                label = "\u03c4" if attr == "tau" else attr
+                severity = ""
+                if pct > 40:
+                    severity = " (muito significativa)"
+                elif pct > 20:
+                    severity = " (significativa)"
+                parts.append(f"{label}: MIE {val_mie}{unit} vs MID {val_mid}{unit} = {pct}%{severity}")
+            lines.append(("Assimetria bilateral: ", parts))
+
+    # Tourniquet effect
+    tq_parts = []
+    for limb, lb_sem, lb_com in [("MIE", 0xDF, 0xE0), ("MID", 0xE1, 0xE2)]:
+        p_sem = params.get(lb_sem)
+        p_com = params.get(lb_com)
+        if p_sem and p_com:
+            eff = tourniquet_effect(p_sem, p_com)
+            to_pct = eff.get("To_pct")
+            if to_pct is not None:
+                sign = "+" if to_pct >= 0 else ""
+                if abs(to_pct) > 15:
+                    interp = "melhora" if to_pct > 0 else "piora"
+                else:
+                    interp = "sem alteração significativa"
+                tq_parts.append(
+                    f"{limb}: To {p_sem.To}s \u2192 {p_com.To}s ({sign}{to_pct}%) {interp}"
+                )
+    if tq_parts:
+        lines.append(("Efeito do garrote: ", tq_parts))
+
+    if not lines:
+        return y
+
+    # Draw
+    font_size = 7.5
+    c.setFont("Helvetica-Bold", font_size)
+    c.setFillColorRGB(*COLOR_CYAN)
+    c.drawString(MARGIN_LEFT, y, "Análise Avançada")
+    y -= 10
+
+    for header, parts in lines:
+        c.setFont("Helvetica-Bold", font_size)
+        c.setFillColorRGB(*COLOR_BLACK)
+        c.drawString(MARGIN_LEFT, y, header)
+        y -= 9
+        c.setFont("Helvetica", font_size)
+        for part in parts:
+            c.setFillColorRGB(*COLOR_CYAN)
+            c.drawString(MARGIN_LEFT + 10, y, part)
+            y -= 9
+
+    y -= 3
     return y
 
 

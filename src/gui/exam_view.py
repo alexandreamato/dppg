@@ -9,7 +9,7 @@ from ..db.schema import Exam, ExamChannel, Patient
 from ..models import PPGBlock, PPGParameters
 from ..analysis import calculate_parameters
 from ..exporters import export_csv, export_json
-from .widgets import PPGCanvas, DiagnosticChart, ParametersTable
+from .widgets import PPGCanvas, DiagnosticChart, ParametersTable, AdvancedAnalysisPanel
 
 
 class ExamView(ttk.Frame):
@@ -86,6 +86,10 @@ class ExamView(ttk.Frame):
         self.diag_chart = DiagnosticChart(diag_frame, width=260, height=185)
         self.diag_chart.pack()
 
+        # Advanced analysis panel
+        self.advanced_panel = AdvancedAnalysisPanel(self, padding=5)
+        self.advanced_panel.pack(fill=tk.X, padx=10, pady=(0, 5))
+
     def load_exam(self, exam: Exam, patient: Patient):
         """Load an exam and display all channels."""
         self.exam = exam
@@ -122,6 +126,9 @@ class ExamView(ttk.Frame):
             if p:
                 points.append((p.To, p.Vo, lbl))
         self.diag_chart.draw(points)
+
+        # Update advanced analysis panel
+        self.advanced_panel.update_analysis(self.params)
 
     def _go_back(self):
         if self.on_back:

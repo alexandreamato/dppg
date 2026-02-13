@@ -47,6 +47,7 @@ PARAM_DESCRIPTIONS = {
     "Ti": "Initial inflow time (s)",
     "Vo": "Venous pump power (%)",
     "Fo": "Venous pump capacity (%s)",
+    "tau": "Exponential time constant (s)",
 }
 
 # Channel display order for the report grid (2x2)

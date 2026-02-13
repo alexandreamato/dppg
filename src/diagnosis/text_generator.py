@@ -2,6 +2,8 @@
 
 from typing import Dict, Optional, Tuple
 from .classifier import classify_channel, classify_pump, tourniquet_comparison, VenousGrade
+from ..analysis import bilateral_asymmetry, tourniquet_effect
+from ..models import PPGParameters
 
 
 # Label byte -> (limb name, has tourniquet)
@@ -33,12 +35,15 @@ GRADE_CONCLUSION = {
 }
 
 
-def generate_diagnosis(channels: Dict[int, dict]) -> str:
+def generate_diagnosis(channels: Dict[int, dict],
+                       params_objects: Optional[Dict[int, 'PPGParameters']] = None) -> str:
     """Generate diagnostic text from channel parameters.
 
     Args:
         channels: dict mapping label_byte -> dict with keys:
             To, Th, Ti, Vo, Fo (float values)
+        params_objects: optional dict mapping label_byte -> PPGParameters
+            (used for tau, asymmetry, and tourniquet effect calculations)
 
     Returns:
         Diagnostic text in Portuguese.
@@ -80,25 +85,49 @@ def generate_diagnosis(channels: Dict[int, dict]) -> str:
                     f"Potência da bomba muscular (Vo) de {Vo:.1f}%, reduzida (patológica)."
                 )
 
+        # Tau (exponential time constant)
+        effective_byte = without_byte if ch_without else with_byte
+        if params_objects:
+            p_obj = params_objects.get(effective_byte)
+            if p_obj and p_obj.tau is not None:
+                lines.append(
+                    f"Constante de tempo (\u03c4) de {p_obj.tau:.1f} segundos."
+                )
+
         # With tourniquet comparison
         if ch_without and ch_with:
             To_s = ch_without["To"]
             To_t = ch_with["To"]
             comp = tourniquet_comparison(To_s, To_t)
 
+            # Quantified tourniquet effect
+            tq_pct = ""
+            if params_objects:
+                p_sem = params_objects.get(without_byte)
+                p_com = params_objects.get(with_byte)
+                if p_sem and p_com:
+                    eff = tourniquet_effect(p_sem, p_com)
+                    to_pct = eff.get("To_pct")
+                    if to_pct is not None:
+                        sign = "+" if to_pct >= 0 else ""
+                        tq_pct = f" ({sign}{to_pct}%)"
+
             if comp == "melhora":
                 lines.append(
-                    f"Com garrote, melhora significativa (To = {To_t:.1f}s), "
+                    f"Com garrote, melhora significativa "
+                    f"(To = {To_t:.1f}s{tq_pct}), "
                     f"sugerindo componente de refluxo em sistema venoso superficial."
                 )
             elif comp == "piora":
                 lines.append(
-                    f"Com garrote, piora do tempo de reenchimento (To = {To_t:.1f}s), "
+                    f"Com garrote, piora do tempo de reenchimento "
+                    f"(To = {To_t:.1f}s{tq_pct}), "
                     f"sugerindo insuficiência venosa profunda ou funcional."
                 )
             else:
                 lines.append(
-                    f"Com garrote, sem alteração significativa (To = {To_t:.1f}s)."
+                    f"Com garrote, sem alteração significativa "
+                    f"(To = {To_t:.1f}s{tq_pct})."
                 )
         elif ch_with and not ch_without:
             To_t = ch_with["To"]
@@ -117,6 +146,22 @@ def generate_diagnosis(channels: Dict[int, dict]) -> str:
                 lines.append("Bombeamento muscular insuficiente.")
 
         paragraphs.append(" ".join(lines))
+
+    # Bilateral asymmetry
+    if params_objects:
+        p_mie = params_objects.get(0xDF)
+        p_mid = params_objects.get(0xE1)
+        if p_mie and p_mid:
+            asym = bilateral_asymmetry(p_mie, p_mid)
+            sig_parts = []
+            for attr, pct in asym.items():
+                if pct > 20:
+                    label = "\u03c4" if attr == "tau" else attr
+                    sig_parts.append(f"{label}: {pct}%")
+            if sig_parts:
+                paragraphs.append(
+                    f"Assimetria significativa entre membros ({', '.join(sig_parts)})."
+                )
 
     # Conclusion
     conclusion_parts = []

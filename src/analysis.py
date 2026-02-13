@@ -213,12 +213,18 @@ def calculate_parameters(block: PPGBlock) -> Optional[PPGParameters]:
             exercise_start_index = i
             break
 
+    # ================================================================
+    # 7. TAU (Exponential time constant)
+    # ================================================================
+    tau = _calculate_tau(samples, peak_idx, To_end_index, initial_baseline, peak_value, sr)
+
     return PPGParameters(
         To=round(To, 1),
         Th=round(Th, 1),
         Ti=round(Ti, 0),
         Vo=round(Vo, 1),
         Fo=round(Fo, 0),
+        tau=tau,
         peak_index=peak_idx,
         To_end_index=To_end_index,
         exercise_start_index=exercise_start_index,
@@ -423,6 +429,110 @@ def _extrapolate_crossing(
         crossing_idx = max_samples
 
     return crossing_idx
+
+
+def _calculate_tau(
+    samples: np.ndarray,
+    peak_idx: int,
+    end_idx: int,
+    baseline: float,
+    peak_value: float,
+    sr: float,
+) -> Optional[float]:
+    """
+    Fit exponential decay y(t) = A * exp(-t/τ) + C to the recovery phase.
+
+    τ represents the speed of venous refilling — larger τ means slower
+    refilling (better venous function).
+
+    Args:
+        samples: Array of all samples
+        peak_idx: Index of the peak
+        end_idx: Index of the recovery endpoint
+        baseline: Baseline ADC value
+        peak_value: Peak ADC value
+        sr: Sampling rate (Hz)
+
+    Returns:
+        τ in seconds, or None if fit fails
+    """
+    if end_idx <= peak_idx:
+        return None
+
+    segment = samples[peak_idx:end_idx + 1]
+    if len(segment) < 10:
+        return None
+
+    t = np.arange(len(segment)) / sr
+    y = np.array(segment, dtype=float)
+
+    A0 = peak_value - baseline
+    if A0 <= 0:
+        return None
+    tau0 = (end_idx - peak_idx) / sr / 3.0
+
+    try:
+        from scipy.optimize import curve_fit
+
+        def exp_decay(t, A, tau, C):
+            return A * np.exp(-t / tau) + C
+
+        popt, _ = curve_fit(exp_decay, t, y, p0=[A0, tau0, baseline], maxfev=5000)
+        tau = abs(popt[1])
+        if tau < 0.5 or tau > 200:
+            return None
+        return round(tau, 1)
+    except Exception:
+        return None
+
+
+def bilateral_asymmetry(
+    params_mie: PPGParameters,
+    params_mid: PPGParameters,
+) -> dict:
+    """Calculate bilateral asymmetry index for each parameter.
+
+    Asymmetry = |param_MIE - param_MID| / max(param_MIE, param_MID) × 100
+
+    Args:
+        params_mie: Parameters for left leg (MIE)
+        params_mid: Parameters for right leg (MID)
+
+    Returns:
+        Dict mapping parameter name to asymmetry percentage.
+        Example: {"To": 35.7, "Vo": 33.3, "tau": 12.5}
+    """
+    result = {}
+    for attr in ("To", "Vo", "tau"):
+        val_mie = getattr(params_mie, attr, None)
+        val_mid = getattr(params_mid, attr, None)
+        if val_mie is not None and val_mid is not None and val_mie > 0 and val_mid > 0:
+            denom = max(val_mie, val_mid)
+            result[attr] = round(abs(val_mie - val_mid) / denom * 100, 1)
+    return result
+
+
+def tourniquet_effect(
+    params_sem: PPGParameters,
+    params_com: PPGParameters,
+) -> dict:
+    """Calculate tourniquet effect as % change.
+
+    Positive = improvement (To increased), negative = worsening (To decreased).
+
+    Args:
+        params_sem: Parameters without tourniquet
+        params_com: Parameters with tourniquet
+
+    Returns:
+        Dict with keys "To_pct" and "Vo_pct" (% change).
+    """
+    result = {}
+    if params_sem.To > 0:
+        result["To_pct"] = round((params_com.To - params_sem.To) / params_sem.To * 100, 1)
+    if params_sem.Vo > 0:
+        result["Vo_pct"] = round((params_com.Vo - params_sem.Vo) / params_sem.Vo * 100, 1)
+    return result
 
 
 def get_diagnostic_zone(To: float, Vo: float) -> str:

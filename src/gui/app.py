@@ -14,16 +14,22 @@ from .exam_view import ExamView
 from .report_editor import ReportEditorView
 from .settings_view import SettingsDialog
 
+APP_VERSION = "1.0"
+AUTHOR_NAME = "Dr. Alexandre Amato"
+
 
 class DPPGManagerApp:
     """Main application class for D-PPG Manager."""
 
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("D-PPG Manager - Vasoquant 1000")
+        self.root.title(f"D-PPG Manager - Vasoquant 1000 - {AUTHOR_NAME}")
         self.root.geometry("1050x780")
 
         self.db = DatabaseOps()
+
+        # Menu bar
+        self._build_menu()
 
         # Container for switching views
         self.container = ttk.Frame(self.root)
@@ -35,6 +41,19 @@ class DPPGManagerApp:
 
         # Show patient list
         self._show_patient_list()
+
+    def _build_menu(self):
+        menubar = tk.Menu(self.root)
+
+        edit_menu = tk.Menu(menubar, tearoff=0)
+        edit_menu.add_command(label="Configurações", command=self._show_settings)
+        menubar.add_cascade(label="Editar", menu=edit_menu)
+
+        help_menu = tk.Menu(menubar, tearoff=0)
+        help_menu.add_command(label="Sobre", command=self._show_about)
+        menubar.add_cascade(label="Ajuda", menu=help_menu)
+
+        self.root.config(menu=menubar)
 
     def _clear_container(self):
         if self._current_view:
@@ -102,6 +121,42 @@ class DPPGManagerApp:
 
     def _show_settings(self):
         SettingsDialog(self.root, self.db)
+
+    def _show_about(self):
+        about = tk.Toplevel(self.root)
+        about.title("Sobre")
+        about.resizable(False, False)
+        about.transient(self.root)
+        about.grab_set()
+
+        frame = ttk.Frame(about, padding=20)
+        frame.pack()
+
+        ttk.Label(frame, text="D-PPG Manager", font=("Helvetica", 16, "bold")).pack(pady=(0, 5))
+        ttk.Label(frame, text=f"Versao {APP_VERSION}", font=("Helvetica", 10)).pack()
+        ttk.Label(frame, text="Vasoquant 1000 Digital Photoplethysmography",
+                  font=("Helvetica", 10)).pack(pady=(5, 10))
+
+        sep = ttk.Separator(frame, orient="horizontal")
+        sep.pack(fill=tk.X, pady=5)
+
+        ttk.Label(frame, text=AUTHOR_NAME, font=("Helvetica", 12, "bold")).pack(pady=(5, 2))
+        ttk.Label(frame, text="Instituto Amato de Medicina Avancada",
+                  font=("Helvetica", 10)).pack()
+        ttk.Label(frame, text="software.amato.com.br", font=("Helvetica", 9),
+                  foreground="gray").pack(pady=(2, 10))
+
+        ttk.Button(frame, text="OK", command=about.destroy).pack()
+
+        # Center on parent
+        about.update_idletasks()
+        pw = self.root.winfo_width()
+        ph = self.root.winfo_height()
+        px = self.root.winfo_x()
+        py = self.root.winfo_y()
+        aw = about.winfo_width()
+        ah = about.winfo_height()
+        about.geometry(f"+{px + (pw - aw) // 2}+{py + (ph - ah) // 2}")
 
     # ================================================================
     # Run

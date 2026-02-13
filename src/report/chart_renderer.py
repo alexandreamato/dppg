@@ -164,6 +164,101 @@ def render_diagnostic_chart(points: List[Tuple[float, float, str]],
     return buf.read()
 
 
+def render_bilateral_radar(params_by_label: Dict[int, 'PPGParameters'],
+                           width_inches=2.8, height_inches=2.8, dpi=150) -> Optional[bytes]:
+    """Render a radar chart comparing MIE vs MID parameters.
+
+    Shows To, Vo, and tau on normalized axes (0-100% of max) for each limb,
+    making bilateral asymmetry immediately visible.
+
+    Args:
+        params_by_label: dict {label_byte: PPGParameters}
+
+    Returns:
+        PNG bytes, or None if insufficient data.
+    """
+    p_mie = params_by_label.get(0xDF)  # MIE s/ Tq
+    p_mid = params_by_label.get(0xE1)  # MID s/ Tq
+
+    if not p_mie or not p_mid:
+        return None
+
+    # Build parameter lists: (label, mie_val, mid_val, unit, reference)
+    axes = []
+    axes.append(("To", p_mie.To, p_mid.To, "s", 25.0))
+    axes.append(("Vo", p_mie.Vo, p_mid.Vo, "%", 6.0))
+    if p_mie.tau is not None and p_mid.tau is not None:
+        axes.append(("\u03c4", p_mie.tau, p_mid.tau, "s", 15.0))
+    axes.append(("Th", p_mie.Th, p_mid.Th, "s", 10.0))
+    axes.append(("Fo", p_mie.Fo, p_mid.Fo, "%s", 60.0))
+
+    n = len(axes)
+    if n < 3:
+        return None
+
+    # Normalize values: fraction of axis max (max = max of both values * 1.3, minimum = reference)
+    labels = []
+    mie_vals = []
+    mid_vals = []
+    for label, mie_v, mid_v, unit, ref in axes:
+        axis_max = max(mie_v, mid_v, ref) * 1.2
+        labels.append(f"{label}\n({unit})")
+        mie_vals.append(mie_v / axis_max if axis_max > 0 else 0)
+        mid_vals.append(mid_v / axis_max if axis_max > 0 else 0)
+
+    # Compute angles
+    angles = np.linspace(0, 2 * np.pi, n, endpoint=False).tolist()
+    # Close the polygon
+    mie_vals.append(mie_vals[0])
+    mid_vals.append(mid_vals[0])
+    angles.append(angles[0])
+
+    fig, ax = plt.subplots(figsize=(width_inches, height_inches), dpi=dpi,
+                           subplot_kw=dict(polar=True))
+
+    # Draw MIE polygon
+    ax.plot(angles, mie_vals, 'o-', color='#0066CC', linewidth=1.5,
+            markersize=4, label='MIE', zorder=5)
+    ax.fill(angles, mie_vals, color='#0066CC', alpha=0.15, zorder=2)
+
+    # Draw MID polygon
+    ax.plot(angles, mid_vals, 's-', color='#CC3300', linewidth=1.5,
+            markersize=4, label='MID', zorder=5)
+    ax.fill(angles, mid_vals, color='#CC3300', alpha=0.15, zorder=2)
+
+    # Axis labels with actual values
+    ax.set_xticks(angles[:-1])
+    tick_labels = []
+    for i, (label, mie_v, mid_v, unit, ref) in enumerate(axes):
+        fmt = ".0f" if label in ("Fo", "Ti") else ".1f"
+        tick_labels.append(f"{label}\n{mie_v:{fmt}}/{mid_v:{fmt}}")
+    ax.set_xticklabels(tick_labels, fontsize=6, fontweight='bold')
+
+    # Radial grid
+    ax.set_ylim(0, 1.05)
+    ax.set_yticks([0.25, 0.5, 0.75, 1.0])
+    ax.set_yticklabels(["", "50%", "", ""], fontsize=4, color='gray')
+    ax.set_rlabel_position(360 / n / 2)
+
+    ax.grid(True, alpha=0.3)
+    ax.spines['polar'].set_visible(False)
+
+    # Legend
+    ax.legend(loc='upper right', bbox_to_anchor=(1.2, 1.1), fontsize=6,
+              framealpha=0.9, handlelength=1.2)
+
+    # Title
+    ax.set_title("Compara\u00e7\u00e3o Bilateral", fontsize=8, fontweight='bold',
+                 pad=12, color='#333333')
+
+    fig.tight_layout(pad=0.3)
+    buf = io.BytesIO()
+    fig.savefig(buf, format='png', dpi=dpi, bbox_inches='tight')
+    plt.close(fig)
+    buf.seek(0)
+    return buf.read()
+
+
 def _empty_chart(w, h, dpi):
     fig, ax = plt.subplots(figsize=(w, h), dpi=dpi)
     ax.text(0.5, 0.5, "Sem dados", ha='center', va='center', fontsize=10, color='gray')

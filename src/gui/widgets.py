@@ -8,7 +8,7 @@ import numpy as np
 
 from ..config import ESTIMATED_SAMPLING_RATE, ADC_TO_PPG_FACTOR, LABEL_DESCRIPTIONS
 from ..models import PPGBlock, PPGParameters
-from ..analysis import calculate_parameters, get_diagnostic_zone
+from ..analysis import calculate_parameters, get_diagnostic_zone, bilateral_asymmetry, tourniquet_effect
 from ..diagnosis.classifier import classify_channel, classify_pump, VenousGrade
 
 
@@ -250,6 +250,7 @@ class ParametersTable(ttk.Frame):
         ("Ti", "Ti (s)"),
         ("Vo", "Vo (%)"),
         ("Fo", "Fo (%s)"),
+        ("tau", "\u03c4 (s)"),
     ]
     _COL_LABELS = [0xDF, 0xE1, 0xE0, 0xE2]  # MIE, MID, MIE Tq, MID Tq
 
@@ -301,7 +302,7 @@ class ParametersTable(ttk.Frame):
                     v = getattr(p, attr, None)
                     if v is not None:
                         text = str(int(v)) if attr == "Fo" else str(v)
-                        # Red for abnormal To or Vo
+                        # Red for abnormal To or Vo; tau always cyan
                         is_abnormal = False
                         if attr == "To" and classify_channel(v) != VenousGrade.NORMAL:
                             is_abnormal = True
@@ -312,3 +313,92 @@ class ParametersTable(ttk.Frame):
                         cell.config(text="-", fg='gray')
                 else:
                     cell.config(text="-", fg='gray')
+
+
+class AdvancedAnalysisPanel(ttk.LabelFrame):
+    """Panel showing bilateral asymmetry and tourniquet effect."""
+
+    # Label bytes: MIE s/Tq, MID s/Tq, MIE c/Tq, MID c/Tq
+    _MIE_SEM = 0xDF
+    _MID_SEM = 0xE1
+    _MIE_COM = 0xE0
+    _MID_COM = 0xE2
+
+    def __init__(self, parent, **kwargs):
+        kwargs.setdefault('text', 'Análise Avançada')
+        super().__init__(parent, **kwargs)
+        self._text_widget = tk.Text(
+            self, wrap=tk.WORD, height=8, font=("Helvetica", 10),
+            bg='#f9f9f9', relief=tk.FLAT, state=tk.DISABLED,
+            padx=6, pady=4,
+        )
+        self._text_widget.pack(fill=tk.BOTH, expand=True)
+        self._text_widget.tag_configure('header', font=("Helvetica", 10, "bold"))
+        self._text_widget.tag_configure('significant', foreground='red')
+        self._text_widget.tag_configure('normal', foreground='#008099')
+
+    def update_analysis(self, params: dict):
+        """Update from dict {label_byte: PPGParameters}."""
+        self._text_widget.config(state=tk.NORMAL)
+        self._text_widget.delete('1.0', tk.END)
+
+        has_content = False
+
+        # --- Bilateral Asymmetry ---
+        p_mie = params.get(self._MIE_SEM)
+        p_mid = params.get(self._MID_SEM)
+        if p_mie and p_mid:
+            asym = bilateral_asymmetry(p_mie, p_mid)
+            if asym:
+                has_content = True
+                self._text_widget.insert(tk.END, "Assimetria Bilateral\n", 'header')
+                for attr, pct in asym.items():
+                    val_mie = getattr(p_mie, attr)
+                    val_mid = getattr(p_mid, attr)
+                    unit = "s" if attr in ("To", "tau") else "%"
+                    label = "\u03c4" if attr == "tau" else attr
+                    tag = 'significant' if pct > 20 else 'normal'
+                    severity = ""
+                    if pct > 40:
+                        severity = " (muito significativa)"
+                    elif pct > 20:
+                        severity = " (significativa)"
+                    line = (f"  {label}: MIE {val_mie}{unit} vs MID {val_mid}{unit}"
+                            f" \u2192 {pct}%{severity}\n")
+                    self._text_widget.insert(tk.END, line, tag)
+                self._text_widget.insert(tk.END, "\n")
+
+        # --- Tourniquet Effect ---
+        tq_data = []
+        for limb, lb_sem, lb_com in [("MIE", self._MIE_SEM, self._MIE_COM),
+                                      ("MID", self._MID_SEM, self._MID_COM)]:
+            p_sem = params.get(lb_sem)
+            p_com = params.get(lb_com)
+            if p_sem and p_com:
+                eff = tourniquet_effect(p_sem, p_com)
+                if eff:
+                    tq_data.append((limb, p_sem, p_com, eff))
+
+        if tq_data:
+            has_content = True
+            self._text_widget.insert(tk.END, "Efeito do Garrote\n", 'header')
+            for limb, p_sem, p_com, eff in tq_data:
+                to_pct = eff.get("To_pct", 0)
+                sign = "+" if to_pct >= 0 else ""
+                if abs(to_pct) > 15:
+                    if to_pct > 0:
+                        interp = "melhora significativa"
+                    else:
+                        interp = "piora significativa"
+                    tag = 'significant' if to_pct < 0 else 'normal'
+                else:
+                    interp = "sem alteração significativa"
+                    tag = 'normal'
+                line = (f"  {limb}: To {p_sem.To}s \u2192 {p_com.To}s "
+                        f"({sign}{to_pct}%) {interp}\n")
+                self._text_widget.insert(tk.END, line, tag)
+
+        if not has_content:
+            self._text_widget.insert(tk.END, "Dados insuficientes para análise avançada.\n")
+
+        self._text_widget.config(state=tk.DISABLED)

@@ -26,6 +26,7 @@ class PPGParameters:
         Ti: Initial inflow time (s) - tempo de influxo inicial
         Vo: Venous pump power (%) - potência da bomba venosa
         Fo: Venous pump capacity (%·s) - capacidade da bomba venosa
+        tau: Exponential time constant (s) - constante de tempo exponencial
         peak_index: Índice do pico máximo (momento zero)
         To_end_index: Índice do fim do To (retorno ao baseline)
         exercise_start_index: Índice do início do exercício
@@ -37,6 +38,7 @@ class PPGParameters:
     Ti: float
     Vo: float
     Fo: float
+    tau: Optional[float] = None
     peak_index: int = 0
     To_end_index: int = 0
     exercise_start_index: int = 0
@@ -45,7 +47,7 @@ class PPGParameters:
 
     def to_dict(self) -> dict:
         """Converte para dicionário (útil para exportação JSON)."""
-        return {
+        d = {
             "To_s": self.To,
             "Th_s": self.Th,
             "Ti_s": self.Ti,
@@ -55,6 +57,9 @@ class PPGParameters:
             "baseline_adc": self.baseline_value,
             "peak_adc": self.peak_value,
         }
+        if self.tau is not None:
+            d["tau_s"] = self.tau
+        return d
 
 
 class PPGBlock:
