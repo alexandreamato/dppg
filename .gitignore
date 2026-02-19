@@ -35,6 +35,18 @@ icon.iconset/
 # Database
 dppg_manager.db
 
-# Dados de teste (CSVs podem ser grandes)
-# Descomente se não quiser versionar os CSVs:
-# ppg_data_*.csv
+# Article (local only, not for repo)
+article.md
+article_dppg.docx
+article_figures/
+generate_article.py
+~$*
+
+# PPG data files (patient data)
+ppg_data_*.csv
+ppg_data_*.json
+vasoview_db_params.*
+
+# Comparison/calibration scripts (reference patient data)
+compare_results.py
+compare_with_db.py
