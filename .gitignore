@@ -17,14 +17,45 @@ ENV/
 .DS_Store
 Thumbs.db
 
-# Binários do software original (grandes, para engenharia reversa local)
+# Original software binaries (large, for local reverse engineering)
 app_original/
 app_original_v2/
 
-# Laudos médicos (dados sensíveis de pacientes)
+# Patient data (sensitive clinical data - NEVER commit)
 laudos/
+laudo oficial*
+ppg_data_*.csv
+ppg_data_*.json
+vasoview_db_params.*
+resultado_esperado.txt
 
-# Captura API Monitor
+# Development scripts with patient data references
+compare_results.py
+compare_with_db.py
+calibrate.py
+validate_30_exams.py
+extract_db_params.py
+extract_laudos.py
+link_patients.py
+parse_patient_idx.py
+read_dbf.py
+read_idx_files.py
+optimize_thresholds.py
+final_ti_analysis.py
+analyze_ti_hypothesis.py
+analyze_ti_pattern.py
+test_ti_*.py
+
+# Obsolete/local-only files
+main.py
+AGENTS.md
+GEMINI.md
+plan_summary.md
+icon_512.png
+Vasoview_*.docx
+DPPG Reader.command
+
+# API Monitor captures
 *.apmx86
 
 # PyInstaller build artifacts
@@ -38,15 +69,10 @@ dppg_manager.db
 # Article (local only, not for repo)
 article.md
 article_dppg.docx
+title_page.docx
 article_figures/
 generate_article.py
 ~$*
 
-# PPG data files (patient data)
-ppg_data_*.csv
-ppg_data_*.json
-vasoview_db_params.*
-
-# Comparison/calibration scripts (reference patient data)
-compare_results.py
-compare_with_db.py
+# Word temp files
+~$*

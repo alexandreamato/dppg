@@ -41,7 +41,6 @@ dppg/
 ├── build_windows.bat           # Script de build para Windows
 ├── requirements.txt            # Dependências: numpy, scipy, matplotlib, reportlab, sqlalchemy
 ├── dppg.icns / dppg.ico        # Ícones do app (macOS / Windows)
-├── icon_512.png                # Ícone fonte (512x512 PNG)
 │
 ├── src/                        # Código-fonte modular
 │   ├── __init__.py
@@ -79,23 +78,32 @@ dppg/
 │       ├── chart_renderer.py   # Renderização matplotlib→PNG (PPG, diagnóstico, radar)
 │       └── pdf_generator.py    # Geração do PDF A4 com reportlab
 │
-├── dppg_reader.py              # App legado (standalone, duplica src/)
-├── DPPG Manager.command        # Launcher macOS (duplo clique)
-├── DPPG Reader.command         # Launcher macOS (duplo clique)
-├── calibrate.py                # Script de calibração de parâmetros
-├── compare_results.py          # Comparação com laudos oficiais
-├── analyze_exam.py             # Análise detalhada de exames
+├── scripts/                    # Scripts utilitários
+│   ├── analyze_exam.py         # Análise detalhada de exames capturados
+│   ├── serial_sniffer.py       # Sniffer serial para debug do protocolo
+│   ├── parse_raw_capture.py    # Parser de capturas brutas
+│   └── sniffer_windows.bat     # Launcher do sniffer para Windows
 │
+├── docs/                       # Documentação de engenharia reversa
+│   ├── DLL_ANALYSIS_REPORT.md  # Relatório de análise da dppg 2.dll
+│   ├── DLL_DISASSEMBLY_FINDINGS.md  # Achados do disassembly
+│   ├── PARAMETROS_CALCULO.md   # Parâmetros de cálculo detalhados
+│   ├── TI_EXTRAPOLATION_ANALYSIS.md  # Análise da extrapolação Ti
+│   ├── CAPTURA_SERIAL_WINDOWS.md  # Guia de captura serial no Windows
+│   └── SNIFFER_WINDOWS.md      # Documentação do sniffer Windows
+│
+├── dppg_reader.py              # App legado (standalone, duplica src/)
 ├── CLAUDE.md                   # Esta documentação
 ├── PROTOCOL.md                 # Documentação detalhada do protocolo (v2.0)
+├── README.md                   # Documentação pública do projeto
+├── LICENSE                     # MIT License
 │
 ├── laudos/                     # Laudos oficiais para validação (gitignored)
-├── app_original/               # Software original Vasoview (gitignored)
-│   └── redist/
-│       ├── dppg 2.dll          # DLL com algoritmos (analisada via radare2)
-│       ├── vl320hw.dll         # DLL de comunicação serial (analisada)
-│       └── ELCmain 2.exe       # Executável principal
-└── ppg_data_*.csv/json         # Dados exportados
+└── app_original/               # Software original Vasoview (gitignored)
+    └── redist/
+        ├── dppg 2.dll          # DLL com algoritmos (analisada via radare2)
+        ├── vl320hw.dll         # DLL de comunicação serial (analisada)
+        └── ELCmain 2.exe       # Executável principal
 ```
 
 ## Funcionalidades do D-PPG Manager
