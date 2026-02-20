@@ -49,9 +49,20 @@ The Elcat Vasoquant 1000 is a digital photoplethysmography (D-PPG) device used f
 
 *Coming soon*
 
-## Installation
+## Download
 
-### From Source
+Standalone executables — no Python required:
+
+| Platform | Download | Size |
+|----------|----------|------|
+| **Windows** | [DPPG-Manager-Windows.zip](https://github.com/alexandreamato/dppg/releases/latest/download/DPPG-Manager-Windows.zip) | ~56 MB |
+| **macOS** | [DPPG-Manager-macOS.zip](https://github.com/alexandreamato/dppg/releases/latest/download/DPPG-Manager-macOS.zip) | ~86 MB |
+
+> **macOS**: After extracting, right-click the app and select "Open" on first launch to bypass Gatekeeper.
+
+See all releases: [github.com/alexandreamato/dppg/releases](https://github.com/alexandreamato/dppg/releases)
+
+## Installation from Source
 
 ```bash
 git clone https://github.com/alexandreamato/dppg.git
@@ -71,19 +82,14 @@ python3 dppg_manager.py
 - Pillow
 - tkinter (included with Python)
 
-### Standalone Executable
+### Building from Source
 
 ```bash
-# macOS
 pip install pyinstaller
 pyinstaller dppg_manager.spec --clean --noconfirm
-open "dist/DPPG Manager.app"
-
-# Windows
-build_windows.bat
 ```
 
-The executable (~88 MB) includes all dependencies. The database is stored in `~/Documents/DPPG Manager/`.
+The database is stored in `~/Documents/DPPG Manager/`.
 
 ## Hardware Setup
 
