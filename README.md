@@ -205,4 +205,14 @@ Sao Paulo, Brazil
 
 ## Disclaimer
 
-This software is provided for research and clinical support purposes. It is not a certified medical device. Clinical decisions should always be made by qualified healthcare professionals using validated diagnostic tools. The authors assume no liability for clinical outcomes resulting from the use of this software.
+THIS SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED. THE AUTHOR ASSUMES NO RESPONSIBILITY OR LIABILITY FOR ANY USE OR MISUSE OF THIS SOFTWARE.
+
+This software is provided for research and educational purposes only. It is **not** a certified or registered medical device and has not been approved by any regulatory agency (ANVISA, FDA, CE, or equivalent). It must not be used as the sole basis for clinical decisions.
+
+The author is not responsible for:
+- Any clinical outcomes resulting from the use of this software
+- Misuse, improper configuration, or use outside intended scope
+- Data loss, equipment damage, or any direct or indirect damages
+- Use of this software in jurisdictions where it may not comply with local regulations
+
+Clinical decisions should always be made by qualified healthcare professionals using validated and certified diagnostic tools. Users assume all risk associated with the use of this software.
