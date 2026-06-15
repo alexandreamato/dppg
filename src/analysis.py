@@ -150,6 +150,12 @@ def calculate_parameters(block: PPGBlock) -> Optional[PPGParameters]:
     # 4c. To
     # ----------------------------------------------------------------
     hw_flags = getattr(block, 'hw_flags', None)
+    # The device transmits To_samples in the export metadata; it is the device's
+    # own (firmware- or operator-set) refilling-time endpoint and is consistently
+    # more accurate than any signal-only reconstruction, so we trust it whenever
+    # present — even when the 0x80 "endpoint not auto-detected" flag is set, where
+    # it carries the operator/extrapolated value. Array indices derived from it are
+    # bounds-clamped below.
     if has_hw and block.hw_To_samples is not None and block.hw_To_samples > 0:
         To_samples_val = block.hw_To_samples
         To = To_samples_val * sample_time
@@ -542,15 +548,12 @@ def get_diagnostic_zone(To: float, Vo: float) -> str:
     Returns:
         String: "normal", "borderline" ou "abnormal"
     """
-    if To <= 20 or Vo <= 2:
+    # Zones consistent with the grade classifier (classify_channel: To>25 = Normal,
+    # 20-25 = Grade I, <=20 = Grade II/III) and the pump classifier (classify_pump:
+    # Vo>=3% = adequate). This keeps the scatter-plot zones and the grade table in
+    # the report from contradicting each other.
+    if To <= 20 or Vo < 3:
         return "abnormal"
-
-    if 20 < To <= 25:
+    if To <= 25:
         return "borderline"
-
-    if To > 24:
-        vo_limit = 4 - (To - 24) * 2 / 26
-        if Vo <= vo_limit:
-            return "borderline"
-
     return "normal"

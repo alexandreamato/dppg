@@ -209,6 +209,14 @@ def _extract_hw_metadata(block: PPGBlock, payload: bytes) -> None:
     """
     sr = int(ESTIMATED_SAMPLING_RATE)
 
+    # Validate before trusting: a genuine hardware block ends with EOT (0x04) at
+    # byte 9. Without this guard a spurious exam-number match in trailing bytes
+    # could populate garbage metadata and silently override the software analysis
+    # (the hardware path is taken whenever these fields are set). Verified: all
+    # real captured blocks have EOT here.
+    if len(payload) < 10 or payload[9] != 0x04:
+        return
+
     block.hw_To_samples = payload[0]
     block.hw_Th_samples = payload[1]
     block.hw_amplitude = payload[2] | (payload[3] << 8)
