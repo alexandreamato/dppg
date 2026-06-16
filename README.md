@@ -131,12 +131,30 @@ Algorithms were reverse-engineered from `dppg 2.dll` via disassembly with radare
 
 ### Validation
 
-Validated against 226 official Vasoscreen reports from 57 patients:
+The five standard parameters were validated against the official Vasoscreen
+reports, with 95% confidence intervals. Accuracy was assessed on the 37 captured
+measurements for which the raw signal was available; a reference cohort of 226
+reports (57 patients) was used for the descriptive statistics.
 
-| Mode | Mean Error | Grade Agreement |
+| Mode | Mean Error (95% CI) | Grade Agreement (95% CI) |
 |------|:----------:|:---------------:|
-| Hardware-assisted | 4.2% | 97% |
-| Software-only | 30.0% | 89% |
+| Hardware-assisted | 1.5% (1.0–2.3) | 92% (79–97) |
+| Software-only | 13.4% (11.2–15.9) | 46% (31–62) |
+
+In hardware-assisted mode the software reads the device's own landmarks
+(including the venous refilling time the firmware serializes in the export
+metadata) and reproduces the official parameters; software-only mode
+reconstructs the landmarks from the raw signal and is a contingency for data
+that lack metadata. The full validation is reproducible from the released
+scripts:
+
+```bash
+python3 validation/run_validation.py      # accuracy + 95% CIs for every reported figure
+python3 validation/to_recoverability.py   # shows the refilling-time endpoint is device/operator-supplied
+```
+
+> Patient-level signals are not distributed (ethics restriction); the scripts
+> run against the institutional dataset and the de-identified reference values.
 
 ## Novel Analyses
 
